@@ -169,26 +169,66 @@ static int closing_token(int open)
     }
 }
 
-static void emit_operand(uint8_t opcode)
+struct Operand {
+    bool indexed;
+    uint8_t value;
+};
+
+static struct Operand read_operand(void)
 {
     if (token != NUMBER && token != VARIABLE)
         fail("expected a numeric constant or scalar variable");
-    if (token == VARIABLE) {
+    struct Operand operand = {token == VARIABLE, value};
+    next(false);
+    return operand;
+}
+
+static void emit_operand(uint8_t opcode, struct Operand operand)
+{
+    if (operand.indexed) {
         frame_in_x();
         opcode += 0x20; /* Immediate to indexed. */
     }
-    instruction(opcode, value);
-    next(false);
+    instruction(opcode, operand.value);
+}
+
+/* $15BB: a single operand can go straight into LDAA, ADDA or SUBA. */
+static void term(uint8_t opcode)
+{
+    struct Operand left = read_operand();
+    if (token != '*' && token != '/') {
+        emit_operand(opcode, left);
+        return;
+    }
+
+    if (opcode != 0x86)
+        emit(0x36); /* PSHA */
+    emit_operand(0x86, left); /* LDAA */
+    do {
+        unsigned routine = token == '*' ? 0x204d : 0x2069;
+        next(false);
+        emit_operand(0xc6, read_operand()); /* LDAB */
+        absolute(0xbd, routine); /* JSR */
+    } while (token == '*' || token == '/');
+
+    if (opcode == 0x8b) {
+        emit(0x33); /* PULB */
+        emit(0x1b); /* ABA */
+    } else if (opcode == 0x80) {
+        emit(0x16); /* TAB */
+        emit(0x32); /* PULA */
+        emit(0x10); /* SBA */
+    }
 }
 
 /* $15A4: apply + and - from left to right. */
 static void expression(void)
 {
-    emit_operand(0x86); /* LDAA */
+    term(0x86); /* LDAA */
     while (token == '+' || token == '-') {
         uint8_t opcode = token == '+' ? 0x8b : 0x80; /* ADDA or SUBA */
         next(false);
-        emit_operand(opcode);
+        term(opcode);
     }
 }
 
