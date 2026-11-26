@@ -169,15 +169,27 @@ static int closing_token(int open)
     }
 }
 
-/* $1502: the first version handles a single scalar operand. */
-static void expression(void)
+static void emit_operand(uint8_t opcode)
 {
     if (token != NUMBER && token != VARIABLE)
         fail("expected a numeric constant or scalar variable");
-    if (token == VARIABLE)
+    if (token == VARIABLE) {
         frame_in_x();
-    instruction(token == NUMBER ? 0x86 : 0xa6, value);
+        opcode += 0x20; /* Immediate to indexed. */
+    }
+    instruction(opcode, value);
     next(false);
+}
+
+/* $15A4: apply + and - from left to right. */
+static void expression(void)
+{
+    emit_operand(0x86); /* LDAA */
+    while (token == '+' || token == '-') {
+        uint8_t opcode = token == '+' ? 0x8b : 0x80; /* ADDA or SUBA */
+        next(false);
+        emit_operand(opcode);
+    }
 }
 
 static void statement(void);
