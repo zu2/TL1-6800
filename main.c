@@ -169,67 +169,105 @@ static int closing_token(int open)
     }
 }
 
+enum OperandKind { IMMEDIATE, INDEXED, ACCUMULATOR };
+
 struct Operand {
-    bool indexed;
+    enum OperandKind kind;
     uint8_t value;
 };
 
+static struct Operand sum(void);
+
+/* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
 {
+    if (token == '(' || token == '[' || token == '{') {
+        int close = closing_token(token);
+        next(false);
+        struct Operand operand = sum();
+        expect(close);
+        return operand;
+    }
     if (token != NUMBER && token != VARIABLE)
         fail("expected a numeric constant or scalar variable");
-    struct Operand operand = {token == VARIABLE, value};
+    struct Operand operand = {token == VARIABLE ? INDEXED : IMMEDIATE, value};
     next(false);
     return operand;
 }
 
 static void emit_operand(uint8_t opcode, struct Operand operand)
 {
-    if (operand.indexed) {
+    if (operand.kind == INDEXED) {
         frame_in_x();
         opcode += 0x20; /* Immediate to indexed. */
     }
     instruction(opcode, operand.value);
 }
 
-/* $15BB: a single operand can go straight into LDAA, ADDA or SUBA. */
-static void term(uint8_t opcode)
+static void load_a(struct Operand operand)
 {
-    struct Operand left = read_operand();
-    if (token != '*' && token != '/') {
-        emit_operand(opcode, left);
+    if (operand.kind != ACCUMULATOR)
+        emit_operand(0x86, operand); /* LDAA */
+}
+
+static void right_operand(uint8_t opcode, struct Operand operand, size_t start)
+{
+    if (operand.kind != ACCUMULATOR) {
+        emit_operand(opcode, operand);
         return;
     }
 
-    if (opcode != 0x86)
-        emit(0x36); /* PSHA */
-    emit_operand(0x86, left); /* LDAA */
-    do {
-        unsigned routine = token == '*' ? 0x204d : 0x2069;
-        next(false);
-        emit_operand(0xc6, read_operand()); /* LDAB */
-        absolute(0xbd, routine); /* JSR */
-    } while (token == '*' || token == '/');
-
+    /* The right side replaced A. Insert PSHA before its code. */
+    emit(0);
+    memmove(code + start + 1, code + start, code_size - start - 1);
+    code[start] = 0x36; /* PSHA */
     if (opcode == 0x8b) {
         emit(0x33); /* PULB */
         emit(0x1b); /* ABA */
-    } else if (opcode == 0x80) {
+    } else {
         emit(0x16); /* TAB */
         emit(0x32); /* PULA */
-        emit(0x10); /* SBA */
+        if (opcode == 0x80)
+            emit(0x10); /* SBA */
     }
 }
 
-/* $15A4: apply + and - from left to right. */
-static void expression(void)
+/* $15BB: * and / use A for the left value and B for the right value. */
+static struct Operand term(void)
 {
-    term(0x86); /* LDAA */
+    struct Operand left = read_operand();
+    while (token == '*' || token == '/') {
+        unsigned routine = token == '*' ? 0x204d : 0x2069;
+        load_a(left);
+        next(false);
+        size_t start = code_size;
+        struct Operand right = read_operand();
+        right_operand(0xc6, right, start); /* LDAB */
+        absolute(0xbd, routine); /* JSR */
+        left.kind = ACCUMULATOR;
+    }
+    return left;
+}
+
+/* $15A4: apply + and - from left to right. */
+static struct Operand sum(void)
+{
+    struct Operand left = term();
     while (token == '+' || token == '-') {
         uint8_t opcode = token == '+' ? 0x8b : 0x80; /* ADDA or SUBA */
+        load_a(left);
         next(false);
-        term(opcode);
+        size_t start = code_size;
+        struct Operand right = term();
+        right_operand(opcode, right, start);
+        left.kind = ACCUMULATOR;
     }
+    return left;
+}
+
+static void expression(void)
+{
+    load_a(sum());
 }
 
 static void statement(void);
