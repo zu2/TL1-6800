@@ -12,7 +12,8 @@
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
-             BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD };
+             BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
+             LT, GT };
 
 struct Name {
     size_t start, length;
@@ -52,6 +53,7 @@ static void next(bool declaring)
         {"VAR", VAR}, {"BEGIN", BEGIN}, {"END", END}, {"WRITE", WRITE},
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
+        {"LT", LT}, {"GT", GT},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -176,7 +178,7 @@ struct Operand {
     uint8_t value;
 };
 
-static struct Operand sum(void);
+static struct Operand comparison(void);
 
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
@@ -184,7 +186,7 @@ static struct Operand read_operand(void)
     if (token == '(' || token == '[' || token == '{') {
         int close = closing_token(token);
         next(false);
-        struct Operand operand = sum();
+        struct Operand operand = comparison();
         expect(close);
         return operand;
     }
@@ -265,9 +267,37 @@ static struct Operand sum(void)
     return left;
 }
 
+/* $1536: subtract, then use the branch condition to build a byte value. */
+static struct Operand comparison(void)
+{
+    struct Operand left = sum();
+    for (;;) {
+        uint8_t branch;
+        switch (token) {
+        case '=': branch = 0x27; break; /* BEQ */
+        case '#': branch = 0x26; break; /* BNE */
+        case '<': branch = 0x25; break; /* BCS */
+        case '>': branch = 0x22; break; /* BHI */
+        case LT:  branch = 0x2d; break; /* BLT */
+        case GT:  branch = 0x2e; break; /* BGT */
+        default: return left;
+        }
+        load_a(left);
+        next(false);
+        size_t start = code_size;
+        struct Operand right = sum();
+        right_operand(0x80, right, start); /* SUBA or SBA */
+        instruction(branch, 3);
+        emit(0x4f); /* CLRA */
+        instruction(0x20, 2); /* BRA */
+        instruction(0x86, 0xff); /* LDAA #$FF */
+        left.kind = ACCUMULATOR;
+    }
+}
+
 static void expression(void)
 {
-    load_a(sum());
+    load_a(comparison());
 }
 
 static void statement(void);
