@@ -13,7 +13,7 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
-             LT, GT };
+             LT, GT, AND, OR, EOR };
 
 struct Name {
     size_t start, length;
@@ -54,6 +54,7 @@ static void next(bool declaring)
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"LT", LT}, {"GT", GT},
+        {"AND", AND}, {"OR", OR}, {"EOR", EOR},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -178,7 +179,7 @@ struct Operand {
     uint8_t value;
 };
 
-static struct Operand comparison(void);
+static struct Operand bitwise(void);
 
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
@@ -186,7 +187,7 @@ static struct Operand read_operand(void)
     if (token == '(' || token == '[' || token == '{') {
         int close = closing_token(token);
         next(false);
-        struct Operand operand = comparison();
+        struct Operand operand = bitwise();
         expect(close);
         return operand;
     }
@@ -226,11 +227,15 @@ static void right_operand(uint8_t opcode, struct Operand operand, size_t start)
     if (opcode == 0x8b) {
         emit(0x33); /* PULB */
         emit(0x1b); /* ABA */
-    } else {
+    } else if (opcode == 0x80 || opcode == 0xc6) {
         emit(0x16); /* TAB */
         emit(0x32); /* PULA */
         if (opcode == 0x80)
             emit(0x10); /* SBA */
+    } else {
+        instruction(0x97, 0x88); /* STAA $88 */
+        emit(0x32); /* PULA */
+        instruction(opcode + 0x10, 0x88); /* Direct mode */
     }
 }
 
@@ -295,9 +300,30 @@ static struct Operand comparison(void)
     }
 }
 
+/* $150A: AND, OR and EOR share a precedence level. */
+static struct Operand bitwise(void)
+{
+    struct Operand left = comparison();
+    for (;;) {
+        uint8_t opcode;
+        switch (token) {
+        case AND: opcode = 0x84; break;
+        case OR:  opcode = 0x8a; break;
+        case EOR: opcode = 0x88; break;
+        default: return left;
+        }
+        load_a(left);
+        next(false);
+        size_t start = code_size;
+        struct Operand right = comparison();
+        right_operand(opcode, right, start);
+        left.kind = ACCUMULATOR;
+    }
+}
+
 static void expression(void)
 {
-    load_a(comparison());
+    load_a(bitwise());
 }
 
 static void statement(void);
