@@ -18,7 +18,8 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
-             MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO };
+             MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
+             CASE, OF, ELSE };
 
 struct Name {
     size_t start, length;
@@ -59,6 +60,7 @@ static void next(bool declaring)
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"FOR", FOR}, {"TO", TO},
+        {"CASE", CASE}, {"OF", OF}, {"ELSE", ELSE},
         {"LT", LT}, {"GT", GT},
         {"AND", AND}, {"OR", OR}, {"EOR", EOR},
         {"ADC", ADC}, {"SBC", SBC},
@@ -278,11 +280,11 @@ static void right_operand(uint8_t opcode, struct Operand operand, size_t start)
     if (opcode == 0x8b) {
         emit(0x33); /* PULB */
         emit(0x1b); /* ABA */
-    } else if (opcode == 0x80 || opcode == 0xc6) {
+    } else if (opcode == 0x80 || opcode == 0x81 || opcode == 0xc6) {
         emit(0x16); /* TAB */
         emit(0x32); /* PULA */
-        if (opcode == 0x80)
-            emit(0x10); /* SBA */
+        if (opcode != 0xc6)
+            emit(opcode - 0x70); /* SBA or CBA */
     } else {
         instruction(0x97, 0x88); /* STAA $88 */
         emit(0x32); /* PULA */
@@ -469,6 +471,36 @@ static void statement(void)
     case WRITE:
         write_statement();
         break;
+    case CASE: {
+        next(false);
+        expression();
+        expect(OF);
+        size_t end_jump = 0;
+        do {
+            size_t start = code_size;
+            struct Operand candidate = parse_expression();
+            right_operand(0x81, candidate, start); /* CMPA or CBA */
+            instruction(0x27, 3); /* BEQ: skip JMP to the next arm. */
+            size_t next_arm = code_size + 1;
+            absolute(0x7e, 0);
+            bool test_x = x_current;
+            statement();
+            /* Link pending exit jumps through their address fields. */
+            absolute(0x7e, end_jump);
+            end_jump = code_size - 2;
+            patch(next_arm);
+            x_current = test_x;
+        } while (token != ELSE);
+        expect(ELSE);
+        statement();
+        x_current = false;
+        while (end_jump) {
+            size_t previous = ((size_t)code[end_jump] << 8) | code[end_jump + 1];
+            patch(end_jump);
+            end_jump = previous;
+        }
+        break;
+    }
     case FOR: {
         next(false);
         if (token != VARIABLE)
