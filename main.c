@@ -19,7 +19,7 @@ enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
              MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
-             CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM };
+             CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM, CALL, CURSOR, TAB, PLOT };
 
 struct Name {
     size_t start, length;
@@ -32,7 +32,7 @@ static uint8_t code[65536 - ORIGIN];
 static struct Name variables[65536];
 static size_t source_size, cursor, token_start, token_length, code_size, variable_count;
 static int token;
-static uint8_t value;
+static uint8_t value, frame_size;
 static bool x_current = true;
 
 static void fail(const char *message)
@@ -73,6 +73,7 @@ static void next(bool declaring)
         {"MEM", MEM},
         {"RND", RND}, {"GET", GET}, {"READ", READ},
         {"ASCII", ASCII}, {"SPACE", SPACE}, {"CRLF", CRLF},
+        {"CALL", CALL}, {"CURSOR", CURSOR}, {"TAB", TAB}, {"PLOT", PLOT},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -237,6 +238,30 @@ static void memory_address(void)
     expect(')');
 }
 
+// $1649: arguments follow the two bytes reserved for the saved frame pointer.
+static void builtin_call(void)
+{
+    static const unsigned routines[] = {0x216f, 0x217b, 0x2185, 0x218f};
+    unsigned routine = routines[token - CALL];
+    next(false);
+    uint8_t caller_size = frame_size;
+    if (token == '(') {
+        ++frame_size;
+        do {
+            next(false);
+            ++frame_size;
+            load_a(parse_expression());
+            frame_in_x();
+            instruction(0xa7, frame_size); // STAA
+        } while (token == ',');
+        expect(')');
+        frame_size = caller_size;
+    }
+    instruction(0x86, caller_size); // LDAA
+    absolute(0xbd, routine); // JSR
+    x_current = true;
+}
+
 // $15EF: brackets may contain a single operand or a full expression.
 static struct Operand read_operand(void)
 {
@@ -278,6 +303,12 @@ static struct Operand read_operand(void)
     case RND: routine = RANDOM; break;
     case GET: routine = GET_CHAR; break;
     case READ: routine = READ_NUMBER; break;
+    case CALL:
+    case CURSOR:
+    case TAB:
+    case PLOT:
+        builtin_call();
+        return (struct Operand){ACCUMULATOR, 0};
     }
     if (opcode || routine) {
         next(false);
@@ -560,6 +591,12 @@ static void statement(void)
     case WRITE:
         write_statement();
         break;
+    case CALL:
+    case CURSOR:
+    case TAB:
+    case PLOT:
+        builtin_call();
+        break;
     case CASE: {
         next(false);
         expression();
@@ -684,11 +721,10 @@ int main(void)
     if (ferror(stdin))
         fail("cannot read source");
     next(false);
-    uint8_t offset = 0;
     if (token == VAR)
-        offset = declarations(offset);
+        frame_size = declarations(frame_size);
     if (token == ARRAY)
-        declarations(offset);
+        frame_size = declarations(frame_size);
     statement();
     if (token != EOF_TOKEN)
         fail("unexpected input after main program");
