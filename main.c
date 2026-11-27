@@ -9,6 +9,7 @@
 #include <string.h>
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
+       ENTER_FRAME = 0x200d, LEAVE_FRAME = 0x2025,
        PRINT_WITH_WIDTH = 0x20a2,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81,
        PRINT_CHAR = 0x2122, PRINT_SPACES = 0x20fd,
@@ -19,21 +20,32 @@ enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
              MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
-             CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM, CALL, CURSOR, TAB, PLOT };
+             CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM, CALL, CURSOR, TAB, PLOT,
+             PROC, PROCEDURE, RETURN };
 
 struct Name {
     size_t start, length;
-    uint8_t offset;
-    bool array;
+    size_t offset;
+    int token;
 };
+
+struct Procedure {
+    unsigned address;
+    size_t pending;
+};
+
+enum Frame { NO_FRAME, LOCAL_FRAME = 0x82, GLOBAL_FRAME = 0x84 };
 
 static unsigned char source[65536];
 static uint8_t code[65536 - ORIGIN];
 static struct Name variables[65536];
 static size_t source_size, cursor, token_start, token_length, code_size, variable_count;
+static struct Procedure procedures[sizeof source / 2];
+static size_t procedure_id, required_procedures, global_names;
 static int token;
 static uint8_t value, frame_size;
-static bool x_current = true;
+static bool in_procedure;
+static enum Frame variable_frame, x_frame = LOCAL_FRAME;
 
 static void fail(const char *message)
 {
@@ -59,7 +71,7 @@ static void next(bool declaring)
 {
     static const struct { const char *word; int token; } keywords[] = {
         {"VAR", VAR}, {"BEGIN", BEGIN}, {"END", END}, {"WRITE", WRITE},
-        {"ARRAY", ARRAY},
+        {"ARRAY", ARRAY}, {"PROC", PROC}, {"RETURN", RETURN},
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"FOR", FOR}, {"TO", TO},
@@ -100,8 +112,13 @@ static void next(bool declaring)
             struct Name name = variables[n - 1];
             if (name.length == token_length &&
                 !memcmp(source + name.start, source + token_start, token_length)) {
-                token = name.array ? ARRAY_NAME : VARIABLE;
-                value = name.offset;
+                token = name.token;
+                if (token == PROCEDURE)
+                    procedure_id = name.offset;
+                else {
+                    value = (uint8_t)name.offset;
+                    variable_frame = in_procedure && n <= global_names ? GLOBAL_FRAME : LOCAL_FRAME;
+                }
                 return;
             }
         }
@@ -164,12 +181,12 @@ static void absolute(uint8_t op, unsigned addr)
 
 static unsigned pc(void) { return ORIGIN + (unsigned)code_size; }
 
-// $13B1: the main program uses the frame pointer at $82.
-static void frame_in_x(void)
+// $13B1: X can hold the local frame or the main program's frame.
+static void frame_in_x(enum Frame frame)
 {
-    if (!x_current)
-        instruction(0xde, 0x82);
-    x_current = true;
+    if (x_frame != frame)
+        instruction(0xde, frame);
+    x_frame = frame;
 }
 
 static void patch(size_t offset)
@@ -178,6 +195,15 @@ static void patch(size_t offset)
         fail("branch target exceeds the address space");
     code[offset] = (uint8_t)(pc() >> 8);
     code[offset + 1] = (uint8_t)pc();
+}
+
+static void patch_jumps(size_t jump)
+{
+    while (jump) {
+        size_t previous = ((size_t)code[jump] << 8) | code[jump + 1];
+        patch(jump);
+        jump = previous;
+    }
 }
 
 static int closing_token(int open)
@@ -196,6 +222,7 @@ enum OperandKind { IMMEDIATE, DIRECT, INDEXED, ACCUMULATOR };
 struct Operand {
     enum OperandKind kind;
     uint8_t value;
+    enum Frame frame;
 };
 
 static struct Operand parse_expression(void);
@@ -205,18 +232,19 @@ static void load_a(struct Operand operand);
 static struct Operand indexed_offset(void)
 {
     uint8_t offset = value;
+    enum Frame frame = variable_frame;
     if (token == VARIABLE) {
         next(false);
-        return (struct Operand){INDEXED, offset};
+        return (struct Operand){INDEXED, offset, frame};
     }
     expect(ARRAY_NAME);
     expect('[');
     struct Operand subscript = parse_expression();
     expect(']');
     if (subscript.kind == IMMEDIATE)
-        return (struct Operand){INDEXED, (uint8_t)(offset + subscript.value)};
+        return (struct Operand){INDEXED, (uint8_t)(offset + subscript.value), frame};
     load_a(subscript);
-    return (struct Operand){ACCUMULATOR, offset};
+    return (struct Operand){ACCUMULATOR, offset, frame};
 }
 
 // $18AF: write the offset into the next indexed instruction.
@@ -239,10 +267,8 @@ static void memory_address(void)
 }
 
 // $1649: arguments follow the two bytes reserved for the saved frame pointer.
-static void builtin_call(void)
+static void call_arguments(void)
 {
-    static const unsigned routines[] = {0x216f, 0x217b, 0x2185, 0x218f};
-    unsigned routine = routines[token - CALL];
     next(false);
     uint8_t caller_size = frame_size;
     if (token == '(') {
@@ -251,15 +277,22 @@ static void builtin_call(void)
             next(false);
             ++frame_size;
             load_a(parse_expression());
-            frame_in_x();
+            frame_in_x(LOCAL_FRAME);
             instruction(0xa7, frame_size); // STAA
         } while (token == ',');
         expect(')');
         frame_size = caller_size;
     }
     instruction(0x86, caller_size); // LDAA
-    absolute(0xbd, routine); // JSR
-    x_current = true;
+    x_frame = LOCAL_FRAME;
+}
+
+static void builtin_call(void)
+{
+    static const unsigned routines[] = {0x216f, 0x217b, 0x2185, 0x218f};
+    unsigned routine = routines[token - CALL];
+    call_arguments();
+    absolute(0xbd, routine);
 }
 
 // $15EF: brackets may contain a single operand or a full expression.
@@ -280,12 +313,12 @@ static struct Operand read_operand(void)
         instruction(0x97, MEM_ADDRESS); // STAA
         instruction(0xde, MEM_ADDRESS); // LDX
         instruction(0xa6, 0); // LDAA ,X
-        x_current = false;
-        return (struct Operand){ACCUMULATOR, 0};
+        x_frame = NO_FRAME;
+        return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     }
 
     if (token == MHIGH || token == MOD) {
-        struct Operand operand = {DIRECT, token == MHIGH ? MHIGH_ADDR : MOD_ADDR};
+        struct Operand operand = {DIRECT, token == MHIGH ? MHIGH_ADDR : MOD_ADDR, NO_FRAME};
         next(false);
         return operand;
     }
@@ -308,7 +341,7 @@ static struct Operand read_operand(void)
     case TAB:
     case PLOT:
         builtin_call();
-        return (struct Operand){ACCUMULATOR, 0};
+        return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     }
     if (opcode || routine) {
         next(false);
@@ -322,19 +355,19 @@ static struct Operand read_operand(void)
         } else {
             emit(opcode);
         }
-        return (struct Operand){ACCUMULATOR, 0};
+        return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     }
 
     if (token == VARIABLE || token == ARRAY_NAME) {
         struct Operand offset = indexed_offset();
         if (offset.kind == ACCUMULATOR) {
-            frame_in_x();
+            frame_in_x(offset.frame);
             instruction(0x8b, offset.value); // ADDA
             emit_array_access(0xb7, 0xa6); // STAA, then LDAA
         }
         return offset;
     }
-    struct Operand operand = {IMMEDIATE, value};
+    struct Operand operand = {IMMEDIATE, value, NO_FRAME};
     expect(NUMBER);
     return operand;
 }
@@ -342,7 +375,7 @@ static struct Operand read_operand(void)
 static void emit_operand(uint8_t opcode, struct Operand operand)
 {
     if (operand.kind == INDEXED) {
-        frame_in_x();
+        frame_in_x(operand.frame);
         opcode += 0x20; // Immediate to indexed.
     } else if (operand.kind == DIRECT) {
         opcode += 0x10; // Immediate to direct.
@@ -495,10 +528,10 @@ static void assignment(void)
         instruction(0xd7, MEM_ADDRESS); // STAB
         instruction(0xde, MEM_ADDRESS); // LDX
         instruction(0xa7, 0); // STAA ,X
-        x_current = false;
+        x_frame = NO_FRAME;
         return;
     }
-    frame_in_x();
+    frame_in_x(offset.frame);
     if (offset.kind == ACCUMULATOR) {
         emit(0x33); // PULB
         emit_array_access(0xf7, 0xa7); // STAB, then STAA
@@ -525,7 +558,7 @@ static void write_statement(void)
             emit(0);
             ++cursor;
             next(false);
-            x_current = false;
+            x_frame = NO_FRAME;
         } else if (token == ASCII || token == SPACE || token == CRLF) {
             int item = token;
             next(false);
@@ -558,7 +591,7 @@ static void write_statement(void)
                 expression();
             }
             absolute(0xbd, routine);
-            x_current = false;
+            x_frame = NO_FRAME;
         }
         if (token != ',')
             break;
@@ -588,6 +621,26 @@ static void statement(void)
         absolute(0x7e, STOP);
         next(false);
         break;
+    case RETURN:
+        if (!in_procedure)
+            fail("RETURN outside a procedure");
+        absolute(0x7e, LEAVE_FRAME);
+        next(false);
+        break;
+    case PROCEDURE: {
+        size_t id = procedure_id;
+        struct Procedure *procedure = &procedures[id];
+        if (required_procedures <= id)
+            required_procedures = id + 1;
+        call_arguments();
+        if (procedure->address) {
+            absolute(0xbd, procedure->address);
+        } else {
+            absolute(0xbd, procedure->pending);
+            procedure->pending = code_size - 2;
+        }
+        break;
+    }
     case WRITE:
         write_statement();
         break;
@@ -607,22 +660,18 @@ static void statement(void)
             instruction(0x27, 3); // BEQ: skip JMP to the next arm.
             size_t next_arm = code_size + 1;
             absolute(0x7e, 0);
-            bool test_x = x_current;
+            enum Frame test_x = x_frame;
             statement();
             // Link pending exit jumps through their address fields.
             absolute(0x7e, end_jump);
             end_jump = code_size - 2;
             patch(next_arm);
-            x_current = test_x;
+            x_frame = test_x;
         } while (token != ELSE);
         expect(ELSE);
         statement();
-        x_current = false;
-        while (end_jump) {
-            size_t previous = ((size_t)code[end_jump] << 8) | code[end_jump + 1];
-            patch(end_jump);
-            end_jump = previous;
-        }
+        x_frame = NO_FRAME;
+        patch_jumps(end_jump);
         break;
     }
     case FOR: {
@@ -630,16 +679,17 @@ static void statement(void)
         if (token != VARIABLE)
             fail("expected a scalar loop variable");
         uint8_t offset = value;
+        enum Frame frame = variable_frame;
         assignment();
         expect(TO);
         expression();
         expect(DO);
         unsigned start = pc();
         emit(0x36); // PSHA: save the limit on each pass.
-        x_current = false;
+        x_frame = NO_FRAME;
         statement();
         emit(0x32); // PULA
-        frame_in_x();
+        frame_in_x(frame);
         instruction(0xa1, offset); // CMPA
         instruction(0x23, 5); // BLS: skip INC and JMP.
         instruction(0x6c, offset); // INC
@@ -651,10 +701,10 @@ static void statement(void)
         bool loop = token == WHILE;
         unsigned start = pc();
         if (loop)
-            x_current = false;
+            x_frame = NO_FRAME;
         next(false);
         expression();
-        bool condition_x = x_current;
+        enum Frame condition_frame = x_frame;
         expect(loop ? DO : THEN);
         instruction(0x26, 3);
         size_t target = code_size + 1;
@@ -662,13 +712,16 @@ static void statement(void)
         statement();
         if (loop)
             absolute(0x7e, start);
-        x_current = loop ? condition_x : condition_x && x_current;
+        if (loop)
+            x_frame = condition_frame;
+        else if (x_frame != condition_frame)
+            x_frame = NO_FRAME;
         patch(target);
         break;
     }
     case REPEAT: {
         unsigned start = pc();
-        x_current = false;
+        x_frame = NO_FRAME;
         next(false);
         while (token != UNTIL)
             statement();
@@ -684,14 +737,18 @@ static void statement(void)
 }
 
 // $10AD: each name takes one byte plus its optional size.
-static uint8_t declarations(uint8_t offset)
+static size_t declarations(size_t offset)
 {
-    bool array = token == ARRAY;
+    int kind = VARIABLE;
+    if (token == ARRAY)
+        kind = ARRAY_NAME;
+    else if (token == PROC)
+        kind = PROCEDURE;
     do {
         next(true);
         if (token != UNKNOWN)
             fail("expected a variable name");
-        variables[variable_count++] = (struct Name){token_start, token_length, offset, array};
+        variables[variable_count++] = (struct Name){token_start, token_length, offset, kind};
         ++offset;
         next(false);
         if (token == '[') {
@@ -704,6 +761,31 @@ static uint8_t declarations(uint8_t offset)
         }
     } while (token == ',');
     return offset;
+}
+
+// $105E: procedure definitions follow the main program.
+static void define_procedure(void)
+{
+    struct Procedure *procedure = &procedures[procedure_id];
+    if (procedure->address)
+        fail("procedure already defined");
+    procedure->address = pc();
+    patch_jumps(procedure->pending);
+    absolute(0xbd, ENTER_FRAME);
+    next(false);
+    frame_size = 0;
+    x_frame = LOCAL_FRAME;
+    if (token == '(') {
+        frame_size = declarations(frame_size);
+        expect(')');
+    }
+    if (token == VAR)
+        frame_size = declarations(frame_size);
+    if (token == ARRAY)
+        frame_size = declarations(frame_size);
+    statement();
+    absolute(0x7e, LEAVE_FRAME);
+    variable_count = global_names;
 }
 
 int main(void)
@@ -721,14 +803,23 @@ int main(void)
     if (ferror(stdin))
         fail("cannot read source");
     next(false);
+    if (token == PROC && declarations(0) > sizeof procedures / sizeof *procedures)
+        fail("too many procedures");
     if (token == VAR)
         frame_size = declarations(frame_size);
     if (token == ARRAY)
         frame_size = declarations(frame_size);
+    global_names = variable_count;
     statement();
+    absolute(0x7e, STOP);
+    in_procedure = true;
+    while (token == PROCEDURE)
+        define_procedure();
     if (token != EOF_TOKEN)
         fail("unexpected input after main program");
-    absolute(0x7e, STOP);
+    for (size_t id = 0; id < required_procedures; ++id)
+        if (!procedures[id].address)
+            fail("undefined procedure");
 
     puts("\t.code");
     for (size_t i = 0; i < code_size; ++i) {
