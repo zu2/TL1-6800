@@ -7,10 +7,12 @@ It uses `as6800` and `ld6800` from Fuzix-Bintools to assemble and link.
 
 ```sh
 make
-./TL1 < program.tl1 > program.s
+./TL1 -o program.s program.tl1
 as6800 program.s
 ld6800 -b -C 0x2222 -o program.bin program.o
 ```
+
+TL1 reads from standard input if you omit the input file and writes to standard output if you omit `-o`.
 
 The TL/1 runtime needed to run generated code is not included yet.
 

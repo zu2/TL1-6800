@@ -1,5 +1,5 @@
 // Native Linux TL/1 compiler, first subset of the MB-6880 TL1.mot port.
-// Usage: cc -std=c11 -O2 -o TL1 main.c; ./TL1 < program.tl1 > program.s
+// Usage: cc -std=c11 -O2 -o TL1 main.c; ./TL1 -o program.s program.tl1
 // Assemble with Fuzix as6800, then link with ld6800 -b -C 0x2222.
 // The generated section starts at $2222 and requires the original runtime.
 #include <stdbool.h>
@@ -46,6 +46,7 @@ static int token;
 static uint8_t value, frame_size;
 static int subprogram_kind;
 static enum Frame variable_frame, x_frame = LOCAL_FRAME;
+static const char *source_path;
 
 static void fail(const char *message)
 {
@@ -53,7 +54,10 @@ static void fail(const char *message)
     for (size_t i = 0; i < token_start; ++i)
         if (source[i] == 5)
             ++line;
-    fprintf(stderr, "TL1: line %zu: %s\n", line, message);
+    if (source_path)
+        fprintf(stderr, "%s:%zu: %s\n", source_path, line, message);
+    else
+        fprintf(stderr, "TL1: line %zu: %s\n", line, message);
     exit(EXIT_FAILURE);
 }
 
@@ -802,10 +806,34 @@ static void define_subprogram(void)
     variable_count = global_names;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
+    const char *output_path = NULL;
+    bool options = true;
+    for (int i = 1; i < argc; ++i) {
+        const char *arg = argv[i];
+        if (options && strcmp(arg, "--") == 0) {
+            options = false;
+        } else if (options && strcmp(arg, "-o") == 0 && !output_path && i + 1 < argc) {
+            output_path = argv[++i];
+        } else if (!source_path && (!options || arg[0] != '-')) {
+            source_path = arg;
+        } else {
+            fputs("Usage: TL1 [-o output.s] [input.tl1]\n", stderr);
+            return EXIT_FAILURE;
+        }
+    }
+
+    FILE *input = stdin;
+    if (source_path) {
+        input = fopen(source_path, "r");
+        if (!input) {
+            perror(source_path);
+            return EXIT_FAILURE;
+        }
+    }
     int c;
-    while ((c = getchar()) != EOF) {
+    while ((c = getc(input)) != EOF) {
         if (source_size == sizeof source)
             fail("source too large");
         if (c == 0)
@@ -814,8 +842,11 @@ int main(void)
             --source_size;
         source[source_size++] = (unsigned char)(c == '\n' ? 5 : c);
     }
-    if (ferror(stdin))
-        fail("cannot read source");
+    if (ferror(input) || (source_path && fclose(input) == EOF)) {
+        perror(source_path ? source_path : "TL1: stdin");
+        return EXIT_FAILURE;
+    }
+
     next(false);
     size_t subprogram_count = 0;
     if (token == PROC)
@@ -840,11 +871,23 @@ int main(void)
         if (!subprograms[id].address)
             fail("undefined subprogram");
 
-    puts("\t.code");
-    for (size_t i = 0; i < code_size; ++i) {
-        printf("%s0x%02x", i % 12 ? "," : "\t.byte ", (unsigned)code[i]);
-        if (i % 12 == 11 || i + 1 == code_size)
-            putchar('\n');
+    FILE *output = stdout;
+    if (output_path) {
+        output = fopen(output_path, "w");
+        if (!output) {
+            perror(output_path);
+            return EXIT_FAILURE;
+        }
     }
-    return fflush(stdout) == EOF ? EXIT_FAILURE : EXIT_SUCCESS;
+    fputs("\t.code\n", output);
+    for (size_t i = 0; i < code_size; ++i) {
+        fprintf(output, "%s0x%02x", i % 12 ? "," : "\t.byte ", (unsigned)code[i]);
+        if (i % 12 == 11 || i + 1 == code_size)
+            putc('\n', output);
+    }
+    if (ferror(output) || (output_path ? fclose(output) : fflush(output)) == EOF) {
+        perror(output_path ? output_path : "TL1: stdout");
+        return EXIT_FAILURE;
+    }
+    return EXIT_SUCCESS;
 }

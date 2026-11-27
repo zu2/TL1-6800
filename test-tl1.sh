@@ -11,7 +11,22 @@ for tool in "$as6800" "$ld6800"; do
 done
 
 work=$(mktemp -d)
-trap 'rm -f "$work"/program.s "$work"/program.o "$work"/program.bin; rmdir "$work"' EXIT
+trap '
+    rm -f "$work"/program.tl1 "$work"/expected.s "$work"/program.s \
+        "$work"/program.o "$work"/program.bin
+    rmdir "$work"
+' EXIT
+
+printf '%s\n' 'BEGIN END' > "$work/program.tl1"
+./TL1 < "$work/program.tl1" > "$work/expected.s"
+./TL1 -o "$work/program.s" "$work/program.tl1"
+cmp "$work/expected.s" "$work/program.s"
+./TL1 "$work/program.tl1" > "$work/program.s"
+cmp "$work/expected.s" "$work/program.s"
+rm "$work/program.s"
+./TL1 -o "$work/program.s" < "$work/program.tl1"
+cmp "$work/expected.s" "$work/program.s"
+
 count=0
 while IFS='|' read -r expected source; do
     printf '%s\n' "$source" | ./TL1 > "$work/program.s"
