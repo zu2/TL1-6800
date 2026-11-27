@@ -11,11 +11,12 @@
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81,
+       RANDOM = 0x202f, GET_CHAR = 0x212e, READ_NUMBER = 0x20d8, INPUT_DEVICE = 0x80,
        MHIGH_ADDR = 0x86, MOD_ADDR = 0x87 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
-             MHIGH, MOD };
+             MHIGH, MOD, RND, GET, READ };
 
 struct Name {
     size_t start, length;
@@ -61,6 +62,7 @@ static void next(bool declaring)
         {"NEG", NEG}, {"NOT", COM}, {"COM", COM},
         {"LSR", LSR}, {"ROR", ROR}, {"ASR", ASR}, {"ASL", ASL}, {"ROL", ROL},
         {"MHIGH", MHIGH}, {"MOD", MOD},
+        {"RND", RND}, {"GET", GET}, {"READ", READ},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -206,6 +208,7 @@ static struct Operand read_operand(void)
     }
 
     uint8_t opcode = 0;
+    unsigned routine = 0;
     switch (token) {
     case NEG: opcode = 0x40; break; /* NEGA */
     case COM: opcode = 0x43; break; /* COMA, also used for NOT */
@@ -214,13 +217,22 @@ static struct Operand read_operand(void)
     case ASR: opcode = 0x47; break; /* ASRA */
     case ASL: opcode = 0x48; break; /* ASLA */
     case ROL: opcode = 0x49; break; /* ROLA */
+    case RND: routine = RANDOM; break;
+    case GET: routine = GET_CHAR; break;
+    case READ: routine = READ_NUMBER; break;
     }
-    if (opcode) {
+    if (opcode || routine) {
         next(false);
         expect('(');
         load_a(parse_expression());
         expect(')');
-        emit(opcode);
+        if (routine) {
+            if (routine != RANDOM)
+                instruction(0x97, INPUT_DEVICE); /* STAA */
+            absolute(0xbd, routine); /* JSR */
+        } else {
+            emit(opcode);
+        }
         return (struct Operand){ACCUMULATOR, 0};
     }
 
