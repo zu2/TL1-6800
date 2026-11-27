@@ -10,6 +10,7 @@
 #include <string.h>
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
+       PRINT_WITH_WIDTH = 0x20a2,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81,
        PRINT_CHAR = 0x2122, PRINT_SPACES = 0x20fd,
        PRINT_NEWLINE = 0x2111, PRINT_NEWLINES = 0x2119,
@@ -471,8 +472,21 @@ static void write_statement(void)
                 absolute(0xbd, routine);
             }
         } else {
-            expression();
-            absolute(0xbd, PRINT_NUMBER);
+            unsigned routine = PRINT_NUMBER;
+            if (token == '#') {
+                next(false);
+                expect('(');
+                expression();
+                emit(0x36); /* PSHA: save the width. */
+                expect(',');
+                expression();
+                expect(')');
+                emit(0x33); /* PULB */
+                routine = PRINT_WITH_WIDTH;
+            } else {
+                expression();
+            }
+            absolute(0xbd, routine);
             x_current = false;
         }
         if (token != ',')
