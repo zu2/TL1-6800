@@ -18,7 +18,7 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
-             MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF };
+             MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO };
 
 struct Name {
     size_t start, length;
@@ -58,6 +58,7 @@ static void next(bool declaring)
         {"VAR", VAR}, {"BEGIN", BEGIN}, {"END", END}, {"WRITE", WRITE},
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
+        {"FOR", FOR}, {"TO", TO},
         {"LT", LT}, {"GT", GT},
         {"AND", AND}, {"OR", OR}, {"EOR", EOR},
         {"ADC", ADC}, {"SBC", SBC},
@@ -468,6 +469,27 @@ static void statement(void)
     case WRITE:
         write_statement();
         break;
+    case FOR: {
+        next(false);
+        if (token != VARIABLE)
+            fail("expected a scalar loop variable");
+        uint8_t offset = value;
+        assignment();
+        expect(TO);
+        expression();
+        expect(DO);
+        unsigned start = pc();
+        emit(0x36); /* PSHA: save the limit on each pass. */
+        x_current = false;
+        statement();
+        emit(0x32); /* PULA */
+        frame_in_x();
+        instruction(0xa1, offset); /* CMPA */
+        instruction(0x23, 5); /* BLS: skip INC and JMP. */
+        instruction(0x6c, offset); /* INC */
+        absolute(0x7e, start);
+        break;
+    }
     case IF:
     case WHILE: {
         bool loop = token == WHILE;
