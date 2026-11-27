@@ -11,12 +11,14 @@
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81,
+       PRINT_CHAR = 0x2122, PRINT_SPACES = 0x20fd,
+       PRINT_NEWLINE = 0x2111, PRINT_NEWLINES = 0x2119,
        RANDOM = 0x202f, GET_CHAR = 0x212e, READ_NUMBER = 0x20d8, INPUT_DEVICE = 0x80,
        MHIGH_ADDR = 0x86, MOD_ADDR = 0x87 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
-             MHIGH, MOD, RND, GET, READ };
+             MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF };
 
 struct Name {
     size_t start, length;
@@ -63,6 +65,7 @@ static void next(bool declaring)
         {"LSR", LSR}, {"ROR", ROR}, {"ASR", ASR}, {"ASL", ASL}, {"ROL", ROL},
         {"MHIGH", MHIGH}, {"MOD", MOD},
         {"RND", RND}, {"GET", GET}, {"READ", READ},
+        {"ASCII", ASCII}, {"SPACE", SPACE}, {"CRLF", CRLF},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -414,11 +417,28 @@ static void write_statement(void)
             emit(0);
             ++cursor;
             next(false);
+            x_current = false;
+        } else if (token == ASCII || token == SPACE || token == CRLF) {
+            int item = token;
+            next(false);
+            if (item == CRLF && token != '(') {
+                absolute(0xbd, PRINT_NEWLINE);
+            } else {
+                expect('(');
+                expression();
+                expect(')');
+                unsigned routine = PRINT_NEWLINES;
+                if (item == ASCII)
+                    routine = PRINT_CHAR;
+                else if (item == SPACE)
+                    routine = PRINT_SPACES;
+                absolute(0xbd, routine);
+            }
         } else {
             expression();
             absolute(0xbd, PRINT_NUMBER);
+            x_current = false;
         }
-        x_current = false;
         if (token != ',')
             break;
         next(false);
