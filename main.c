@@ -833,7 +833,8 @@ int main(void)
     absolute(0x7e, STOP);
     while (token == PROCEDURE || token == FUNCTION)
         define_subprogram();
-    if (token != EOF_TOKEN)
+    // $105E: the original compiler stops at a top-level slash.
+    if (token != EOF_TOKEN && token != '/')
         fail("unexpected input after main program");
     for (size_t id = 0; id < required_subprograms; ++id)
         if (!subprograms[id].address)
