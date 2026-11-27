@@ -39,9 +39,15 @@ struct Subprogram {
 };
 
 enum Frame { NO_FRAME, LOCAL_FRAME = 0x82, GLOBAL_FRAME = 0x84 };
+enum AddressingMode {
+    MODE_NONE, MODE_INHERENT, MODE_IMMEDIATE, MODE_DIRECT,
+    MODE_INDEXED, MODE_RELATIVE, MODE_EXTENDED
+};
 
 static unsigned char source[65536];
 static uint8_t code[65536 - ORIGIN];
+// Only the opcode byte has an addressing mode.
+static uint8_t instruction_mode[sizeof code];
 static struct Name variables[65536];
 static size_t source_size, cursor, token_start, token_length, code_size, variable_count;
 static struct Subprogram subprograms[sizeof source / 2];
@@ -168,23 +174,53 @@ static void expect(int wanted)
     next(false);
 }
 
-static void emit(uint8_t b)
+static void emit_byte(uint8_t b)
 {
     if (code_size == sizeof code)
         fail("generated code exceeds the address space");
+    instruction_mode[code_size] = MODE_NONE;
     code[code_size++] = b;
 }
 
-static void instruction(uint8_t op, uint8_t operand)
+static void emit_inherent(uint8_t op)
 {
-    emit(op);
-    emit(operand);
+    emit_byte(op);
+    instruction_mode[code_size - 1] = MODE_INHERENT;
 }
 
-static void absolute(uint8_t op, unsigned addr)
+static void emit_with_byte_operand(uint8_t op, uint8_t operand, enum AddressingMode mode)
 {
-    instruction(op, (uint8_t)(addr >> 8));
-    emit((uint8_t)addr);
+    emit_byte(op);
+    emit_byte(operand);
+    instruction_mode[code_size - 2] = mode;
+}
+
+static void emit_immediate(uint8_t op, uint8_t value)
+{
+    emit_with_byte_operand(op, value, MODE_IMMEDIATE);
+}
+
+static void emit_direct(uint8_t op, uint8_t addr)
+{
+    emit_with_byte_operand(op, addr, MODE_DIRECT);
+}
+
+static void emit_indexed(uint8_t op, uint8_t offset)
+{
+    emit_with_byte_operand(op, offset, MODE_INDEXED);
+}
+
+static void emit_relative(uint8_t op, int8_t displacement)
+{
+    emit_with_byte_operand(op, (uint8_t)displacement, MODE_RELATIVE);
+}
+
+static void emit_extended(uint8_t op, unsigned addr)
+{
+    emit_byte(op);
+    emit_byte((uint8_t)(addr >> 8));
+    emit_byte((uint8_t)addr);
+    instruction_mode[code_size - 3] = MODE_EXTENDED;
 }
 
 static unsigned pc(void) { return ORIGIN + (unsigned)code_size; }
@@ -193,7 +229,7 @@ static unsigned pc(void) { return ORIGIN + (unsigned)code_size; }
 static void frame_in_x(enum Frame frame)
 {
     if (x_frame != frame)
-        instruction(0xde, frame);
+        emit_direct(0xde, frame);
     x_frame = frame;
 }
 
@@ -258,8 +294,8 @@ static struct Operand indexed_offset(void)
 // $18AF: write the offset into the next indexed instruction.
 static void emit_array_access(uint8_t patch_opcode, uint8_t access_opcode)
 {
-    absolute(patch_opcode, pc() + 4);
-    instruction(access_opcode, 0); // The original leaves this byte untouched.
+    emit_extended(patch_opcode, pc() + 4);
+    emit_indexed(access_opcode, 0); // The original leaves this byte untouched.
 }
 
 // $1718: leave the high byte on the stack and the low byte in A.
@@ -268,7 +304,7 @@ static void memory_address(void)
     expect(MEM);
     expect('(');
     load_a(parse_expression());
-    emit(0x36); // PSHA
+    emit_inherent(0x36); // PSHA
     expect(',');
     load_a(parse_expression());
     expect(')');
@@ -286,12 +322,12 @@ static void call_arguments(void)
             ++frame_size;
             load_a(parse_expression());
             frame_in_x(LOCAL_FRAME);
-            instruction(0xa7, frame_size); // STAA
+            emit_indexed(0xa7, frame_size); // STAA
         } while (token == ',');
         expect(')');
         frame_size = caller_size;
     }
-    instruction(0x86, caller_size); // LDAA
+    emit_immediate(0x86, caller_size); // LDAA
     x_frame = LOCAL_FRAME;
 }
 
@@ -300,7 +336,7 @@ static void builtin_call(void)
     static const unsigned routines[] = {0x216f, 0x217b, 0x2185, 0x218f};
     unsigned routine = routines[token - CALL];
     call_arguments();
-    absolute(0xbd, routine);
+    emit_extended(0xbd, routine);
 }
 
 // $1847: link calls until the subprogram address is known.
@@ -312,9 +348,9 @@ static void subprogram_call(void)
         required_subprograms = id + 1;
     call_arguments();
     if (subprogram->address) {
-        absolute(0xbd, subprogram->address);
+        emit_extended(0xbd, subprogram->address);
     } else {
-        absolute(0xbd, subprogram->pending);
+        emit_extended(0xbd, subprogram->pending);
         subprogram->pending = code_size - 2;
     }
 }
@@ -332,11 +368,11 @@ static struct Operand read_operand(void)
 
     if (token == MEM) {
         memory_address();
-        instruction(0x97, MEM_ADDRESS + 1); // STAA
-        emit(0x32); // PULA
-        instruction(0x97, MEM_ADDRESS); // STAA
-        instruction(0xde, MEM_ADDRESS); // LDX
-        instruction(0xa6, 0); // LDAA ,X
+        emit_direct(0x97, MEM_ADDRESS + 1); // STAA
+        emit_inherent(0x32); // PULA
+        emit_direct(0x97, MEM_ADDRESS); // STAA
+        emit_direct(0xde, MEM_ADDRESS); // LDX
+        emit_indexed(0xa6, 0); // LDAA ,X
         x_frame = NO_FRAME;
         return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     }
@@ -377,10 +413,10 @@ static struct Operand read_operand(void)
         expect(')');
         if (routine) {
             if (routine != RANDOM)
-                instruction(0x97, INPUT_DEVICE); // STAA
-            absolute(0xbd, routine); // JSR
+                emit_direct(0x97, INPUT_DEVICE); // STAA
+            emit_extended(0xbd, routine); // JSR
         } else {
-            emit(opcode);
+            emit_inherent(opcode);
         }
         return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     }
@@ -389,7 +425,7 @@ static struct Operand read_operand(void)
         struct Operand offset = indexed_offset();
         if (offset.kind == ACCUMULATOR) {
             frame_in_x(offset.frame);
-            instruction(0x8b, offset.value); // ADDA
+            emit_immediate(0x8b, offset.value); // ADDA
             emit_array_access(0xb7, 0xa6); // STAA, then LDAA
         }
         return offset;
@@ -403,11 +439,12 @@ static void emit_operand(uint8_t opcode, struct Operand operand)
 {
     if (operand.kind == INDEXED) {
         frame_in_x(operand.frame);
-        opcode += 0x20; // Immediate to indexed.
+        emit_indexed(opcode + 0x20, operand.value);
     } else if (operand.kind == DIRECT) {
-        opcode += 0x10; // Immediate to direct.
+        emit_direct(opcode + 0x10, operand.value);
+    } else {
+        emit_immediate(opcode, operand.value);
     }
-    instruction(opcode, operand.value);
 }
 
 static void load_a(struct Operand operand)
@@ -419,7 +456,7 @@ static void load_a(struct Operand operand)
 static void right_operand(uint8_t opcode, struct Operand (*parse)(void))
 {
     // Reserve PSHA before parsing so absolute addresses stay in place.
-    emit(0x36);
+    emit_inherent(0x36);
     struct Operand operand = parse();
     if (operand.kind != ACCUMULATOR) {
         --code_size;
@@ -428,17 +465,17 @@ static void right_operand(uint8_t opcode, struct Operand (*parse)(void))
     }
 
     if (opcode == 0x8b) {
-        emit(0x33); // PULB
-        emit(0x1b); // ABA
+        emit_inherent(0x33); // PULB
+        emit_inherent(0x1b); // ABA
     } else if (opcode == 0x80 || opcode == 0x81 || opcode == 0xc6) {
-        emit(0x16); // TAB
-        emit(0x32); // PULA
+        emit_inherent(0x16); // TAB
+        emit_inherent(0x32); // PULA
         if (opcode != 0xc6)
-            emit(opcode - 0x70); // SBA or CBA
+            emit_inherent(opcode - 0x70); // SBA or CBA
     } else {
-        instruction(0x97, 0x88); // STAA $88
-        emit(0x32); // PULA
-        instruction(opcode + 0x10, 0x88); // Direct mode
+        emit_direct(0x97, 0x88); // STAA $88
+        emit_inherent(0x32); // PULA
+        emit_direct(opcode + 0x10, 0x88); // Direct mode
     }
 }
 
@@ -451,7 +488,7 @@ static struct Operand term(void)
         load_a(left);
         next(false);
         right_operand(0xc6, read_operand); // LDAB
-        absolute(0xbd, routine); // JSR
+        emit_extended(0xbd, routine); // JSR
         left.kind = ACCUMULATOR;
     }
     return left;
@@ -489,10 +526,10 @@ static struct Operand comparison(void)
         load_a(left);
         next(false);
         right_operand(0x80, sum); // SUBA or SBA
-        instruction(branch, 3);
-        emit(0x4f); // CLRA
-        instruction(0x20, 2); // BRA
-        instruction(0x86, 0xff); // LDAA #$FF
+        emit_relative(branch, 3);
+        emit_inherent(0x4f); // CLRA
+        emit_relative(0x20, 2); // BRA
+        emit_immediate(0x86, 0xff); // LDAA #$FF
         left.kind = ACCUMULATOR;
     }
 }
@@ -532,12 +569,12 @@ static void assignment(void)
     struct Operand offset = {0};
     if (memory) {
         memory_address();
-        emit(0x36); // PSHA
+        emit_inherent(0x36); // PSHA
     } else {
         offset = indexed_offset();
         if (offset.kind == ACCUMULATOR) {
-            instruction(0x8b, offset.value); // ADDA
-            emit(0x36); // PSHA
+            emit_immediate(0x8b, offset.value); // ADDA
+            emit_inherent(0x36); // PSHA
         }
     }
     if (token == ',') {
@@ -549,21 +586,21 @@ static void assignment(void)
         expression();
     }
     if (memory) {
-        emit(0x33); // PULB
-        instruction(0xd7, MEM_ADDRESS + 1); // STAB
-        emit(0x33); // PULB
-        instruction(0xd7, MEM_ADDRESS); // STAB
-        instruction(0xde, MEM_ADDRESS); // LDX
-        instruction(0xa7, 0); // STAA ,X
+        emit_inherent(0x33); // PULB
+        emit_direct(0xd7, MEM_ADDRESS + 1); // STAB
+        emit_inherent(0x33); // PULB
+        emit_direct(0xd7, MEM_ADDRESS); // STAB
+        emit_direct(0xde, MEM_ADDRESS); // LDX
+        emit_indexed(0xa7, 0); // STAA ,X
         x_frame = NO_FRAME;
         return;
     }
     frame_in_x(offset.frame);
     if (offset.kind == ACCUMULATOR) {
-        emit(0x33); // PULB
+        emit_inherent(0x33); // PULB
         emit_array_access(0xf7, 0xa7); // STAB, then STAA
     } else {
-        instruction(0xa7, offset.value);
+        emit_indexed(0xa7, offset.value);
     }
 }
 
@@ -573,16 +610,16 @@ static void write_statement(void)
     expect(WRITE);
     expect('(');
     expression();
-    instruction(0x97, OUTPUT_DEVICE);
+    emit_direct(0x97, OUTPUT_DEVICE);
     expect(':');
     for (;;) {
         if (token == '"') {
-            absolute(0xbd, PRINT_STRING);
+            emit_extended(0xbd, PRINT_STRING);
             while (peek() != '"' && peek() != EOF_TOKEN)
-                emit(source[cursor++]);
+                emit_byte(source[cursor++]);
             if (peek() == EOF_TOKEN)
                 fail("unterminated string");
-            emit(0);
+            emit_byte(0);
             ++cursor;
             next(false);
             x_frame = NO_FRAME;
@@ -590,7 +627,7 @@ static void write_statement(void)
             int item = token;
             next(false);
             if (item == CRLF && token != '(') {
-                absolute(0xbd, PRINT_NEWLINE);
+                emit_extended(0xbd, PRINT_NEWLINE);
             } else {
                 expect('(');
                 expression();
@@ -600,7 +637,7 @@ static void write_statement(void)
                     routine = PRINT_CHAR;
                 else if (item == SPACE)
                     routine = PRINT_SPACES;
-                absolute(0xbd, routine);
+                emit_extended(0xbd, routine);
             }
         } else {
             unsigned routine = PRINT_NUMBER;
@@ -608,16 +645,16 @@ static void write_statement(void)
                 next(false);
                 expect('(');
                 expression();
-                emit(0x36); // PSHA: save the width.
+                emit_inherent(0x36); // PSHA: save the width.
                 expect(',');
                 expression();
                 expect(')');
-                emit(0x33); // PULB
+                emit_inherent(0x33); // PULB
                 routine = PRINT_WITH_WIDTH;
             } else {
                 expression();
             }
-            absolute(0xbd, routine);
+            emit_extended(0xbd, routine);
             x_frame = NO_FRAME;
         }
         if (token != ',')
@@ -645,7 +682,7 @@ static void statement(void)
         assignment();
         break;
     case STOP_WORD:
-        absolute(0x7e, STOP);
+        emit_extended(0x7e, STOP);
         next(false);
         break;
     case RETURN:
@@ -654,7 +691,7 @@ static void statement(void)
         next(false);
         if (subprogram_kind == FUNCTION)
             expression();
-        absolute(0x7e, LEAVE_FRAME);
+        emit_extended(0x7e, LEAVE_FRAME);
         break;
     case PROCEDURE:
         subprogram_call();
@@ -675,13 +712,13 @@ static void statement(void)
         size_t end_jump = 0;
         do {
             right_operand(0x81, parse_expression); // CMPA or CBA
-            instruction(0x27, 3); // BEQ: skip JMP to the next arm.
+            emit_relative(0x27, 3); // BEQ: skip JMP to the next arm.
             size_t next_arm = code_size + 1;
-            absolute(0x7e, 0);
+            emit_extended(0x7e, 0);
             enum Frame test_x = x_frame;
             statement();
             // Link pending exit jumps through their address fields.
-            absolute(0x7e, end_jump);
+            emit_extended(0x7e, end_jump);
             end_jump = code_size - 2;
             patch(next_arm);
             x_frame = test_x;
@@ -703,15 +740,15 @@ static void statement(void)
         expression();
         expect(DO);
         unsigned start = pc();
-        emit(0x36); // PSHA: save the limit on each pass.
+        emit_inherent(0x36); // PSHA: save the limit on each pass.
         x_frame = NO_FRAME;
         statement();
-        emit(0x32); // PULA
+        emit_inherent(0x32); // PULA
         frame_in_x(frame);
-        instruction(0xa1, offset); // CMPA
-        instruction(0x23, 5); // BLS: skip INC and JMP.
-        instruction(0x6c, offset); // INC
-        absolute(0x7e, start);
+        emit_indexed(0xa1, offset); // CMPA
+        emit_relative(0x23, 5); // BLS: skip INC and JMP.
+        emit_indexed(0x6c, offset); // INC
+        emit_extended(0x7e, start);
         break;
     }
     case IF:
@@ -724,12 +761,12 @@ static void statement(void)
         expression();
         enum Frame condition_frame = x_frame;
         expect(loop ? DO : THEN);
-        instruction(0x26, 3);
+        emit_relative(0x26, 3);
         size_t target = code_size + 1;
-        absolute(0x7e, 0);
+        emit_extended(0x7e, 0);
         statement();
         if (loop)
-            absolute(0x7e, start);
+            emit_extended(0x7e, start);
         if (loop)
             x_frame = condition_frame;
         else if (x_frame != condition_frame)
@@ -745,8 +782,8 @@ static void statement(void)
             statement();
         expect(UNTIL);
         expression();
-        instruction(0x26, 3);
-        absolute(0x7e, start);
+        emit_relative(0x26, 3);
+        emit_extended(0x7e, start);
         break;
     }
     default:
@@ -791,7 +828,7 @@ static void define_subprogram(void)
         fail("subprogram already defined");
     subprogram->address = pc();
     patch_jumps(subprogram->pending);
-    absolute(0xbd, ENTER_FRAME);
+    emit_extended(0xbd, ENTER_FRAME);
     subprogram_kind = token;
     next(false);
     frame_size = 0;
@@ -806,7 +843,7 @@ static void define_subprogram(void)
         frame_size = declarations(frame_size);
     statement();
     if (subprogram_kind == PROCEDURE)
-        absolute(0x7e, LEAVE_FRAME);
+        emit_extended(0x7e, LEAVE_FRAME);
     variable_count = global_names;
 }
 
@@ -896,7 +933,7 @@ int main(int argc, char **argv)
         frame_size = declarations(frame_size);
     global_names = variable_count;
     statement();
-    absolute(0x7e, STOP);
+    emit_extended(0x7e, STOP);
     while (token == PROCEDURE || token == FUNCTION)
         define_subprogram();
     // $105E: the original compiler stops at a top-level slash.
@@ -917,11 +954,23 @@ int main(int argc, char **argv)
         return EXIT_FAILURE;
     }
     fputs("\t.code\n", output);
+    static const uint8_t byte_count[] = {
+        [MODE_NONE] = 1, [MODE_INHERENT] = 1, [MODE_IMMEDIATE] = 2,
+        [MODE_DIRECT] = 2, [MODE_INDEXED] = 2, [MODE_RELATIVE] = 2,
+        [MODE_EXTENDED] = 3,
+    };
+    enum { BYTES_PER_LINE = 12 };
+    unsigned line_bytes = 0;
     for (size_t i = 0; i < code_size; ++i) {
-        fprintf(output, "%s0x%02x", i % 12 ? "," : "\t.byte ", (unsigned)code[i]);
-        if (i % 12 == 11 || i + 1 == code_size)
+        if (line_bytes + byte_count[instruction_mode[i]] > BYTES_PER_LINE) {
             putc('\n', output);
+            line_bytes = 0;
+        }
+        fprintf(output, "%s0x%02x", line_bytes ? "," : "\t.byte ", (unsigned)code[i]);
+        ++line_bytes;
     }
+    if (line_bytes)
+        putc('\n', output);
     if (ferror(output) || (output_path ? fclose(output) : fflush(output)) == EOF) {
         perror(output_path ? output_path : "TL1: stdout");
         return EXIT_FAILURE;
