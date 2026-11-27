@@ -1,0 +1,32 @@
+name: Tests
+
+on:
+  pull_request:
+  workflow_dispatch:
+  push:
+    tags:
+      - '**'
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+
+      - name: Build as6800 and ld6800
+        run: |
+          tools="$RUNNER_TEMP/Fuzix-Bintools"
+          git init -q "$tools"
+          git -C "$tools" fetch --depth=1 https://codeberg.org/EtchedPixels/Fuzix-Bintools.git 4d542cb0cb24ea1f75e4c77e8a754a61548fec9d
+          git -C "$tools" checkout -q --detach FETCH_HEAD
+          make -C "$tools" as6800 ld6800
+
+      - name: Compare generated binaries
+        run: |
+          tools="$RUNNER_TEMP/Fuzix-Bintools"
+          make test AS6800="$tools/as6800" LD6800="$tools/ld6800"
