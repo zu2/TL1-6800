@@ -19,10 +19,12 @@ enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
              MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
-             CASE, OF, ELSE };
+             CASE, OF, ELSE, ARRAY, ARRAY_NAME };
 
 struct Name {
     size_t start, length;
+    uint8_t offset;
+    bool array;
 };
 
 static unsigned char source[65536];
@@ -57,6 +59,7 @@ static void next(bool declaring)
 {
     static const struct { const char *word; int token; } keywords[] = {
         {"VAR", VAR}, {"BEGIN", BEGIN}, {"END", END}, {"WRITE", WRITE},
+        {"ARRAY", ARRAY},
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"FOR", FOR}, {"TO", TO},
@@ -95,8 +98,8 @@ static void next(bool declaring)
             struct Name name = variables[n - 1];
             if (name.length == token_length &&
                 !memcmp(source + name.start, source + token_start, token_length)) {
-                token = VARIABLE;
-                value = (uint8_t)(n - 1);
+                token = name.array ? ARRAY_NAME : VARIABLE;
+                value = name.offset;
                 return;
             }
         }
@@ -196,6 +199,23 @@ struct Operand {
 static struct Operand parse_expression(void);
 static void load_a(struct Operand operand);
 
+/* $1732: a constant subscript adds to the array offset. */
+static uint8_t indexed_offset(void)
+{
+    uint8_t offset = value;
+    if (token == VARIABLE) {
+        next(false);
+        return offset;
+    }
+    expect(ARRAY_NAME);
+    expect('[');
+    struct Operand subscript = parse_expression();
+    if (subscript.kind != IMMEDIATE)
+        fail("expected a constant array subscript");
+    expect(']');
+    return (uint8_t)(offset + subscript.value);
+}
+
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
 {
@@ -242,10 +262,10 @@ static struct Operand read_operand(void)
         return (struct Operand){ACCUMULATOR, 0};
     }
 
-    if (token != NUMBER && token != VARIABLE)
-        fail("expected a numeric constant or scalar variable");
-    struct Operand operand = {token == VARIABLE ? INDEXED : IMMEDIATE, value};
-    next(false);
+    if (token == VARIABLE || token == ARRAY_NAME)
+        return (struct Operand){INDEXED, indexed_offset()};
+    struct Operand operand = {IMMEDIATE, value};
+    expect(NUMBER);
     return operand;
 }
 
@@ -386,12 +406,9 @@ static void statement(void);
 /* $115F: evaluate the right side once, then store in reverse order. */
 static void assignment(void)
 {
-    uint8_t offset = value;
-    expect(VARIABLE);
+    uint8_t offset = indexed_offset();
     if (token == ',') {
         next(false);
-        if (token != VARIABLE)
-            fail("expected a scalar variable");
         assignment();
     } else {
         expect(':');
@@ -462,6 +479,7 @@ static void statement(void)
     }
     switch (token) {
     case VARIABLE:
+    case ARRAY_NAME:
         assignment();
         break;
     case STOP_WORD:
@@ -559,6 +577,29 @@ static void statement(void)
     }
 }
 
+/* $10AD: each name takes one byte plus its optional size. */
+static uint8_t declarations(uint8_t offset)
+{
+    bool array = token == ARRAY;
+    do {
+        next(true);
+        if (token != UNKNOWN)
+            fail("expected a variable name");
+        variables[variable_count++] = (struct Name){token_start, token_length, offset, array};
+        ++offset;
+        next(false);
+        if (token == '[') {
+            next(false);
+            if (token != NUMBER || letter(source[token_start]))
+                fail("expected a literal size");
+            offset += value;
+            next(false);
+            expect(']');
+        }
+    } while (token == ',');
+    return offset;
+}
+
 int main(void)
 {
     int c;
@@ -574,15 +615,11 @@ int main(void)
     if (ferror(stdin))
         fail("cannot read source");
     next(false);
-    if (token == VAR) {
-        do {
-            next(true);
-            if (token != UNKNOWN)
-                fail("expected a variable name");
-            variables[variable_count++] = (struct Name){token_start, token_length};
-            next(false);
-        } while (token == ',');
-    }
+    uint8_t offset = 0;
+    if (token == VAR)
+        offset = declarations(offset);
+    if (token == ARRAY)
+        declarations(offset);
     statement();
     if (token != EOF_TOKEN)
         fail("unexpected input after main program");
