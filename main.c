@@ -199,21 +199,29 @@ struct Operand {
 static struct Operand parse_expression(void);
 static void load_a(struct Operand operand);
 
-/* $1732: a constant subscript adds to the array offset. */
-static uint8_t indexed_offset(void)
+/* $1732: a dynamic subscript is in A and value holds the array base. */
+static struct Operand indexed_offset(void)
 {
     uint8_t offset = value;
     if (token == VARIABLE) {
         next(false);
-        return offset;
+        return (struct Operand){INDEXED, offset};
     }
     expect(ARRAY_NAME);
     expect('[');
     struct Operand subscript = parse_expression();
-    if (subscript.kind != IMMEDIATE)
-        fail("expected a constant array subscript");
     expect(']');
-    return (uint8_t)(offset + subscript.value);
+    if (subscript.kind == IMMEDIATE)
+        return (struct Operand){INDEXED, (uint8_t)(offset + subscript.value)};
+    load_a(subscript);
+    return (struct Operand){ACCUMULATOR, offset};
+}
+
+/* $18AF: write the offset into the next indexed instruction. */
+static void emit_array_access(uint8_t patch_opcode, uint8_t access_opcode)
+{
+    absolute(patch_opcode, pc() + 4);
+    instruction(access_opcode, 0); /* The original leaves this byte untouched. */
 }
 
 /* $15EF: brackets may contain a single operand or a full expression. */
@@ -262,8 +270,15 @@ static struct Operand read_operand(void)
         return (struct Operand){ACCUMULATOR, 0};
     }
 
-    if (token == VARIABLE || token == ARRAY_NAME)
-        return (struct Operand){INDEXED, indexed_offset()};
+    if (token == VARIABLE || token == ARRAY_NAME) {
+        struct Operand offset = indexed_offset();
+        if (offset.kind == ACCUMULATOR) {
+            frame_in_x();
+            instruction(0x8b, offset.value); /* ADDA */
+            emit_array_access(0xb7, 0xa6); /* STAA, then LDAA */
+        }
+        return offset;
+    }
     struct Operand operand = {IMMEDIATE, value};
     expect(NUMBER);
     return operand;
@@ -286,17 +301,17 @@ static void load_a(struct Operand operand)
         emit_operand(0x86, operand); /* LDAA */
 }
 
-static void right_operand(uint8_t opcode, struct Operand operand, size_t start)
+static void right_operand(uint8_t opcode, struct Operand (*parse)(void))
 {
+    /* Reserve PSHA before parsing so absolute addresses stay in place. */
+    emit(0x36);
+    struct Operand operand = parse();
     if (operand.kind != ACCUMULATOR) {
+        --code_size;
         emit_operand(opcode, operand);
         return;
     }
 
-    /* The right side replaced A. Insert PSHA before its code. */
-    emit(0);
-    memmove(code + start + 1, code + start, code_size - start - 1);
-    code[start] = 0x36; /* PSHA */
     if (opcode == 0x8b) {
         emit(0x33); /* PULB */
         emit(0x1b); /* ABA */
@@ -320,9 +335,7 @@ static struct Operand term(void)
         unsigned routine = token == '*' ? 0x204d : 0x2069;
         load_a(left);
         next(false);
-        size_t start = code_size;
-        struct Operand right = read_operand();
-        right_operand(0xc6, right, start); /* LDAB */
+        right_operand(0xc6, read_operand); /* LDAB */
         absolute(0xbd, routine); /* JSR */
         left.kind = ACCUMULATOR;
     }
@@ -337,9 +350,7 @@ static struct Operand sum(void)
         uint8_t opcode = token == '+' ? 0x8b : 0x80; /* ADDA or SUBA */
         load_a(left);
         next(false);
-        size_t start = code_size;
-        struct Operand right = term();
-        right_operand(opcode, right, start);
+        right_operand(opcode, term);
         left.kind = ACCUMULATOR;
     }
     return left;
@@ -362,9 +373,7 @@ static struct Operand comparison(void)
         }
         load_a(left);
         next(false);
-        size_t start = code_size;
-        struct Operand right = sum();
-        right_operand(0x80, right, start); /* SUBA or SBA */
+        right_operand(0x80, sum); /* SUBA or SBA */
         instruction(branch, 3);
         emit(0x4f); /* CLRA */
         instruction(0x20, 2); /* BRA */
@@ -389,9 +398,7 @@ static struct Operand parse_expression(void)
         }
         load_a(left);
         next(false);
-        size_t start = code_size;
-        struct Operand right = comparison();
-        right_operand(opcode, right, start);
+        right_operand(opcode, comparison);
         left.kind = ACCUMULATOR;
     }
 }
@@ -406,7 +413,11 @@ static void statement(void);
 /* $115F: evaluate the right side once, then store in reverse order. */
 static void assignment(void)
 {
-    uint8_t offset = indexed_offset();
+    struct Operand offset = indexed_offset();
+    if (offset.kind == ACCUMULATOR) {
+        instruction(0x8b, offset.value); /* ADDA */
+        emit(0x36); /* PSHA */
+    }
     if (token == ',') {
         next(false);
         assignment();
@@ -416,7 +427,12 @@ static void assignment(void)
         expression();
     }
     frame_in_x();
-    instruction(0xa7, offset);
+    if (offset.kind == ACCUMULATOR) {
+        emit(0x33); /* PULB */
+        emit_array_access(0xf7, 0xa7); /* STAB, then STAA */
+    } else {
+        instruction(0xa7, offset.value);
+    }
 }
 
 /* $1301: device selection precedes the list. Strings follow the JSR inline. */
@@ -495,9 +511,7 @@ static void statement(void)
         expect(OF);
         size_t end_jump = 0;
         do {
-            size_t start = code_size;
-            struct Operand candidate = parse_expression();
-            right_operand(0x81, candidate, start); /* CMPA or CBA */
+            right_operand(0x81, parse_expression); /* CMPA or CBA */
             instruction(0x27, 3); /* BEQ: skip JMP to the next arm. */
             size_t next_arm = code_size + 1;
             absolute(0x7e, 0);
