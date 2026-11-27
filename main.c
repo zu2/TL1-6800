@@ -10,10 +10,12 @@
 #include <string.h>
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
-       PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81 };
+       PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81,
+       MHIGH_ADDR = 0x86, MOD_ADDR = 0x87 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
-             LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL };
+             LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
+             MHIGH, MOD };
 
 struct Name {
     size_t start, length;
@@ -58,6 +60,7 @@ static void next(bool declaring)
         {"ADC", ADC}, {"SBC", SBC},
         {"NEG", NEG}, {"NOT", COM}, {"COM", COM},
         {"LSR", LSR}, {"ROR", ROR}, {"ASR", ASR}, {"ASL", ASL}, {"ROL", ROL},
+        {"MHIGH", MHIGH}, {"MOD", MOD},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -175,7 +178,7 @@ static int closing_token(int open)
     }
 }
 
-enum OperandKind { IMMEDIATE, INDEXED, ACCUMULATOR };
+enum OperandKind { IMMEDIATE, DIRECT, INDEXED, ACCUMULATOR };
 
 struct Operand {
     enum OperandKind kind;
@@ -193,6 +196,12 @@ static struct Operand read_operand(void)
         next(false);
         struct Operand operand = parse_expression();
         expect(close);
+        return operand;
+    }
+
+    if (token == MHIGH || token == MOD) {
+        struct Operand operand = {DIRECT, token == MHIGH ? MHIGH_ADDR : MOD_ADDR};
+        next(false);
         return operand;
     }
 
@@ -227,6 +236,8 @@ static void emit_operand(uint8_t opcode, struct Operand operand)
     if (operand.kind == INDEXED) {
         frame_in_x();
         opcode += 0x20; /* Immediate to indexed. */
+    } else if (operand.kind == DIRECT) {
+        opcode += 0x10; /* Immediate to direct. */
     }
     instruction(opcode, operand.value);
 }
