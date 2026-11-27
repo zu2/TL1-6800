@@ -15,12 +15,12 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_CHAR = 0x2122, PRINT_SPACES = 0x20fd,
        PRINT_NEWLINE = 0x2111, PRINT_NEWLINES = 0x2119,
        RANDOM = 0x202f, GET_CHAR = 0x212e, READ_NUMBER = 0x20d8, INPUT_DEVICE = 0x80,
-       MHIGH_ADDR = 0x86, MOD_ADDR = 0x87 };
+       MHIGH_ADDR = 0x86, MOD_ADDR = 0x87, MEM_ADDRESS = 0x88 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
              MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
-             CASE, OF, ELSE, ARRAY, ARRAY_NAME };
+             CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM };
 
 struct Name {
     size_t start, length;
@@ -71,6 +71,7 @@ static void next(bool declaring)
         {"NEG", NEG}, {"NOT", COM}, {"COM", COM},
         {"LSR", LSR}, {"ROR", ROR}, {"ASR", ASR}, {"ASL", ASL}, {"ROL", ROL},
         {"MHIGH", MHIGH}, {"MOD", MOD},
+        {"MEM", MEM},
         {"RND", RND}, {"GET", GET}, {"READ", READ},
         {"ASCII", ASCII}, {"SPACE", SPACE}, {"CRLF", CRLF},
 
@@ -225,6 +226,18 @@ static void emit_array_access(uint8_t patch_opcode, uint8_t access_opcode)
     instruction(access_opcode, 0); /* The original leaves this byte untouched. */
 }
 
+/* $1718: leave the high byte on the stack and the low byte in A. */
+static void memory_address(void)
+{
+    expect(MEM);
+    expect('(');
+    load_a(parse_expression());
+    emit(0x36); /* PSHA */
+    expect(',');
+    load_a(parse_expression());
+    expect(')');
+}
+
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
 {
@@ -234,6 +247,17 @@ static struct Operand read_operand(void)
         struct Operand operand = parse_expression();
         expect(close);
         return operand;
+    }
+
+    if (token == MEM) {
+        memory_address();
+        instruction(0x97, MEM_ADDRESS + 1); /* STAA */
+        emit(0x32); /* PULA */
+        instruction(0x97, MEM_ADDRESS); /* STAA */
+        instruction(0xde, MEM_ADDRESS); /* LDX */
+        instruction(0xa6, 0); /* LDAA ,X */
+        x_current = false;
+        return (struct Operand){ACCUMULATOR, 0};
     }
 
     if (token == MHIGH || token == MOD) {
@@ -414,10 +438,17 @@ static void statement(void);
 /* $115F: evaluate the right side once, then store in reverse order. */
 static void assignment(void)
 {
-    struct Operand offset = indexed_offset();
-    if (offset.kind == ACCUMULATOR) {
-        instruction(0x8b, offset.value); /* ADDA */
+    bool memory = token == MEM;
+    struct Operand offset = {0};
+    if (memory) {
+        memory_address();
         emit(0x36); /* PSHA */
+    } else {
+        offset = indexed_offset();
+        if (offset.kind == ACCUMULATOR) {
+            instruction(0x8b, offset.value); /* ADDA */
+            emit(0x36); /* PSHA */
+        }
     }
     if (token == ',') {
         next(false);
@@ -426,6 +457,16 @@ static void assignment(void)
         expect(':');
         expect('=');
         expression();
+    }
+    if (memory) {
+        emit(0x33); /* PULB */
+        instruction(0xd7, MEM_ADDRESS + 1); /* STAB */
+        emit(0x33); /* PULB */
+        instruction(0xd7, MEM_ADDRESS); /* STAB */
+        instruction(0xde, MEM_ADDRESS); /* LDX */
+        instruction(0xa7, 0); /* STAA ,X */
+        x_current = false;
+        return;
     }
     frame_in_x();
     if (offset.kind == ACCUMULATOR) {
@@ -510,6 +551,7 @@ static void statement(void)
     switch (token) {
     case VARIABLE:
     case ARRAY_NAME:
+    case MEM:
         assignment();
         break;
     case STOP_WORD:
