@@ -13,7 +13,7 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
-             LT, GT, AND, OR, EOR, ADC, SBC };
+             LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL };
 
 struct Name {
     size_t start, length;
@@ -56,6 +56,8 @@ static void next(bool declaring)
         {"LT", LT}, {"GT", GT},
         {"AND", AND}, {"OR", OR}, {"EOR", EOR},
         {"ADC", ADC}, {"SBC", SBC},
+        {"NEG", NEG}, {"NOT", COM}, {"COM", COM},
+        {"LSR", LSR}, {"ROR", ROR}, {"ASR", ASR}, {"ASL", ASL}, {"ROL", ROL},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -181,6 +183,7 @@ struct Operand {
 };
 
 static struct Operand parse_expression(void);
+static void load_a(struct Operand operand);
 
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
@@ -192,6 +195,26 @@ static struct Operand read_operand(void)
         expect(close);
         return operand;
     }
+
+    uint8_t opcode = 0;
+    switch (token) {
+    case NEG: opcode = 0x40; break; /* NEGA */
+    case COM: opcode = 0x43; break; /* COMA, also used for NOT */
+    case LSR: opcode = 0x44; break; /* LSRA */
+    case ROR: opcode = 0x46; break; /* RORA */
+    case ASR: opcode = 0x47; break; /* ASRA */
+    case ASL: opcode = 0x48; break; /* ASLA */
+    case ROL: opcode = 0x49; break; /* ROLA */
+    }
+    if (opcode) {
+        next(false);
+        expect('(');
+        load_a(parse_expression());
+        expect(')');
+        emit(opcode);
+        return (struct Operand){ACCUMULATOR, 0};
+    }
+
     if (token != NUMBER && token != VARIABLE)
         fail("expected a numeric constant or scalar variable");
     struct Operand operand = {token == VARIABLE ? INDEXED : IMMEDIATE, value};
