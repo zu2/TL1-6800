@@ -13,7 +13,7 @@ enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        PRINT_STRING = 0x2108, OUTPUT_DEVICE = 0x81 };
 enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              BEGIN, END, WRITE, IF, THEN, WHILE, DO, REPEAT, UNTIL, STOP_WORD,
-             LT, GT, AND, OR, EOR };
+             LT, GT, AND, OR, EOR, ADC, SBC };
 
 struct Name {
     size_t start, length;
@@ -55,6 +55,7 @@ static void next(bool declaring)
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"LT", LT}, {"GT", GT},
         {"AND", AND}, {"OR", OR}, {"EOR", EOR},
+        {"ADC", ADC}, {"SBC", SBC},
 
         {"TRUE", NUMBER}, {"FALSE", NUMBER}
     };
@@ -179,7 +180,7 @@ struct Operand {
     uint8_t value;
 };
 
-static struct Operand bitwise(void);
+static struct Operand parse_expression(void);
 
 /* $15EF: brackets may contain a single operand or a full expression. */
 static struct Operand read_operand(void)
@@ -187,7 +188,7 @@ static struct Operand read_operand(void)
     if (token == '(' || token == '[' || token == '{') {
         int close = closing_token(token);
         next(false);
-        struct Operand operand = bitwise();
+        struct Operand operand = parse_expression();
         expect(close);
         return operand;
     }
@@ -300,8 +301,8 @@ static struct Operand comparison(void)
     }
 }
 
-/* $150A: AND, OR and EOR share a precedence level. */
-static struct Operand bitwise(void)
+/* $150A: AND, OR, EOR, ADC and SBC share a precedence level. */
+static struct Operand parse_expression(void)
 {
     struct Operand left = comparison();
     for (;;) {
@@ -310,6 +311,8 @@ static struct Operand bitwise(void)
         case AND: opcode = 0x84; break;
         case OR:  opcode = 0x8a; break;
         case EOR: opcode = 0x88; break;
+        case ADC: opcode = 0x89; break;
+        case SBC: opcode = 0x82; break;
         default: return left;
         }
         load_a(left);
@@ -323,7 +326,7 @@ static struct Operand bitwise(void)
 
 static void expression(void)
 {
-    load_a(bitwise());
+    load_a(parse_expression());
 }
 
 static void statement(void);
