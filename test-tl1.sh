@@ -13,7 +13,7 @@ done
 work=$(mktemp -d)
 trap '
     rm -f "$work"/program.tl1 "$work"/expected.s "$work"/program.s \
-        "$work"/program.o "$work"/program.bin
+        "$work"/program.o "$work"/program.bin "$work"/source-link.tl1
     rmdir "$work"
 ' EXIT
 
@@ -26,6 +26,15 @@ cmp "$work/expected.s" "$work/program.s"
 rm "$work/program.s"
 ./TL1 -o "$work/program.s" < "$work/program.tl1"
 cmp "$work/expected.s" "$work/program.s"
+
+ln "$work/program.tl1" "$work/source-link.tl1"
+for path in "$work/program.tl1" "$work/source-link.tl1"; do
+    if ./TL1 -o "$path" "$work/program.tl1" 2>/dev/null; then
+        printf 'FAIL: accepted the input file as output: %s\n' "$path" >&2
+        exit 1
+    fi
+done
+printf '%s\n' 'BEGIN END' | cmp "$work/program.tl1" -
 
 count=0
 while IFS='|' read -r expected source; do

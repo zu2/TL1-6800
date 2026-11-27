@@ -2,11 +2,15 @@
 // Usage: cc -std=c11 -O2 -o TL1 main.c; ./TL1 -o program.s program.tl1
 // Assemble with Fuzix as6800, then link with ld6800 -b -C 0x2222.
 // The generated section starts at $2222 and requires the original runtime.
+#define _POSIX_C_SOURCE 200809L
+#include <fcntl.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 enum { ORIGIN = 0x2222, STOP = 0x209e, PRINT_NUMBER = 0x20a1,
        ENTER_FRAME = 0x200d, LEAVE_FRAME = 0x2025,
@@ -806,6 +810,37 @@ static void define_subprogram(void)
     variable_count = global_names;
 }
 
+static FILE *open_output(const char *path, FILE *input)
+{
+    // Check the opened file before truncating it.
+    int fd = open(path, O_WRONLY | O_CREAT, 0666);
+    if (fd == -1) {
+        perror(path);
+        return NULL;
+    }
+    FILE *output = fdopen(fd, "w");
+    if (!output) {
+        perror(path);
+        close(fd);
+        return NULL;
+    }
+
+    struct stat input_stat, output_stat;
+    if (fstat(fileno(input), &input_stat) == -1 || fstat(fd, &output_stat) == -1) {
+        perror(path);
+    } else if (!S_ISREG(output_stat.st_mode)) {
+        return output;
+    } else if (input_stat.st_dev == output_stat.st_dev && input_stat.st_ino == output_stat.st_ino) {
+        fprintf(stderr, "TL1: %s is the input file\n", path);
+    } else if (ftruncate(fd, 0) == 0) {
+        return output;
+    } else {
+        perror(path);
+    }
+    fclose(output);
+    return NULL;
+}
+
 int main(int argc, char **argv)
 {
     const char *output_path = NULL;
@@ -842,7 +877,7 @@ int main(int argc, char **argv)
             --source_size;
         source[source_size++] = (unsigned char)(c == '\n' ? 5 : c);
     }
-    if (ferror(input) || (source_path && fclose(input) == EOF)) {
+    if (ferror(input)) {
         perror(source_path ? source_path : "TL1: stdin");
         return EXIT_FAILURE;
     }
@@ -873,11 +908,13 @@ int main(int argc, char **argv)
 
     FILE *output = stdout;
     if (output_path) {
-        output = fopen(output_path, "w");
-        if (!output) {
-            perror(output_path);
+        output = open_output(output_path, input);
+        if (!output)
             return EXIT_FAILURE;
-        }
+    }
+    if (source_path && fclose(input) == EOF) {
+        perror(source_path);
+        return EXIT_FAILURE;
     }
     fputs("\t.code\n", output);
     for (size_t i = 0; i < code_size; ++i) {
