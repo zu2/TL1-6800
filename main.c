@@ -21,7 +21,7 @@ enum Token { EOF_TOKEN = -1, NUMBER = 256, VARIABLE, UNKNOWN, VAR,
              LT, GT, AND, OR, EOR, ADC, SBC, NEG, COM, LSR, ROR, ASR, ASL, ROL,
              MHIGH, MOD, RND, GET, READ, ASCII, SPACE, CRLF, FOR, TO,
              CASE, OF, ELSE, ARRAY, ARRAY_NAME, MEM, CALL, CURSOR, TAB, PLOT,
-             PROC, PROCEDURE, RETURN };
+             PROC, FUNC, PROCEDURE, FUNCTION, RETURN };
 
 struct Name {
     size_t start, length;
@@ -29,7 +29,7 @@ struct Name {
     int token;
 };
 
-struct Procedure {
+struct Subprogram {
     unsigned address;
     size_t pending;
 };
@@ -40,11 +40,11 @@ static unsigned char source[65536];
 static uint8_t code[65536 - ORIGIN];
 static struct Name variables[65536];
 static size_t source_size, cursor, token_start, token_length, code_size, variable_count;
-static struct Procedure procedures[sizeof source / 2];
-static size_t procedure_id, required_procedures, global_names;
+static struct Subprogram subprograms[sizeof source / 2];
+static size_t subprogram_id, required_subprograms, global_names;
 static int token;
 static uint8_t value, frame_size;
-static bool in_procedure;
+static int subprogram_kind;
 static enum Frame variable_frame, x_frame = LOCAL_FRAME;
 
 static void fail(const char *message)
@@ -71,7 +71,7 @@ static void next(bool declaring)
 {
     static const struct { const char *word; int token; } keywords[] = {
         {"VAR", VAR}, {"BEGIN", BEGIN}, {"END", END}, {"WRITE", WRITE},
-        {"ARRAY", ARRAY}, {"PROC", PROC}, {"RETURN", RETURN},
+        {"ARRAY", ARRAY}, {"PROC", PROC}, {"FUNC", FUNC}, {"RETURN", RETURN},
         {"IF", IF}, {"THEN", THEN}, {"WHILE", WHILE}, {"DO", DO},
         {"REPEAT", REPEAT}, {"UNTIL", UNTIL}, {"STOP", STOP_WORD},
         {"FOR", FOR}, {"TO", TO},
@@ -113,11 +113,11 @@ static void next(bool declaring)
             if (name.length == token_length &&
                 !memcmp(source + name.start, source + token_start, token_length)) {
                 token = name.token;
-                if (token == PROCEDURE)
-                    procedure_id = name.offset;
+                if (token == PROCEDURE || token == FUNCTION)
+                    subprogram_id = name.offset;
                 else {
                     value = (uint8_t)name.offset;
-                    variable_frame = in_procedure && n <= global_names ? GLOBAL_FRAME : LOCAL_FRAME;
+                    variable_frame = subprogram_kind && n <= global_names ? GLOBAL_FRAME : LOCAL_FRAME;
                 }
                 return;
             }
@@ -295,6 +295,22 @@ static void builtin_call(void)
     absolute(0xbd, routine);
 }
 
+// $1847: link calls until the subprogram address is known.
+static void subprogram_call(void)
+{
+    size_t id = subprogram_id;
+    struct Subprogram *subprogram = &subprograms[id];
+    if (required_subprograms <= id)
+        required_subprograms = id + 1;
+    call_arguments();
+    if (subprogram->address) {
+        absolute(0xbd, subprogram->address);
+    } else {
+        absolute(0xbd, subprogram->pending);
+        subprogram->pending = code_size - 2;
+    }
+}
+
 // $15EF: brackets may contain a single operand or a full expression.
 static struct Operand read_operand(void)
 {
@@ -326,6 +342,9 @@ static struct Operand read_operand(void)
     uint8_t opcode = 0;
     unsigned routine = 0;
     switch (token) {
+    case FUNCTION:
+        subprogram_call();
+        return (struct Operand){ACCUMULATOR, 0, NO_FRAME};
     case NEG: opcode = 0x40; break; // NEGA
     case COM: opcode = 0x43; break; // COMA, also used for NOT
     case LSR: opcode = 0x44; break; // LSRA
@@ -622,25 +641,16 @@ static void statement(void)
         next(false);
         break;
     case RETURN:
-        if (!in_procedure)
-            fail("RETURN outside a procedure");
-        absolute(0x7e, LEAVE_FRAME);
+        if (!subprogram_kind)
+            fail("RETURN outside a subprogram");
         next(false);
+        if (subprogram_kind == FUNCTION)
+            expression();
+        absolute(0x7e, LEAVE_FRAME);
         break;
-    case PROCEDURE: {
-        size_t id = procedure_id;
-        struct Procedure *procedure = &procedures[id];
-        if (required_procedures <= id)
-            required_procedures = id + 1;
-        call_arguments();
-        if (procedure->address) {
-            absolute(0xbd, procedure->address);
-        } else {
-            absolute(0xbd, procedure->pending);
-            procedure->pending = code_size - 2;
-        }
+    case PROCEDURE:
+        subprogram_call();
         break;
-    }
     case WRITE:
         write_statement();
         break;
@@ -744,6 +754,8 @@ static size_t declarations(size_t offset)
         kind = ARRAY_NAME;
     else if (token == PROC)
         kind = PROCEDURE;
+    else if (token == FUNC)
+        kind = FUNCTION;
     do {
         next(true);
         if (token != UNKNOWN)
@@ -763,15 +775,16 @@ static size_t declarations(size_t offset)
     return offset;
 }
 
-// $105E: procedure definitions follow the main program.
-static void define_procedure(void)
+// $105E: subprogram definitions follow the main program.
+static void define_subprogram(void)
 {
-    struct Procedure *procedure = &procedures[procedure_id];
-    if (procedure->address)
-        fail("procedure already defined");
-    procedure->address = pc();
-    patch_jumps(procedure->pending);
+    struct Subprogram *subprogram = &subprograms[subprogram_id];
+    if (subprogram->address)
+        fail("subprogram already defined");
+    subprogram->address = pc();
+    patch_jumps(subprogram->pending);
     absolute(0xbd, ENTER_FRAME);
+    subprogram_kind = token;
     next(false);
     frame_size = 0;
     x_frame = LOCAL_FRAME;
@@ -784,7 +797,8 @@ static void define_procedure(void)
     if (token == ARRAY)
         frame_size = declarations(frame_size);
     statement();
-    absolute(0x7e, LEAVE_FRAME);
+    if (subprogram_kind == PROCEDURE)
+        absolute(0x7e, LEAVE_FRAME);
     variable_count = global_names;
 }
 
@@ -803,8 +817,13 @@ int main(void)
     if (ferror(stdin))
         fail("cannot read source");
     next(false);
-    if (token == PROC && declarations(0) > sizeof procedures / sizeof *procedures)
-        fail("too many procedures");
+    size_t subprogram_count = 0;
+    if (token == PROC)
+        subprogram_count = declarations(0);
+    if (token == FUNC)
+        subprogram_count = declarations(subprogram_count);
+    if (subprogram_count > sizeof subprograms / sizeof *subprograms)
+        fail("too many subprograms");
     if (token == VAR)
         frame_size = declarations(frame_size);
     if (token == ARRAY)
@@ -812,14 +831,13 @@ int main(void)
     global_names = variable_count;
     statement();
     absolute(0x7e, STOP);
-    in_procedure = true;
-    while (token == PROCEDURE)
-        define_procedure();
+    while (token == PROCEDURE || token == FUNCTION)
+        define_subprogram();
     if (token != EOF_TOKEN)
         fail("unexpected input after main program");
-    for (size_t id = 0; id < required_procedures; ++id)
-        if (!procedures[id].address)
-            fail("undefined procedure");
+    for (size_t id = 0; id < required_subprograms; ++id)
+        if (!subprograms[id].address)
+            fail("undefined subprogram");
 
     puts("\t.code");
     for (size_t i = 0; i < code_size; ++i) {
