@@ -1,8 +1,7 @@
-/* Native Linux TL/1 compiler, first subset of the MB-6880 TL1.mot port.
- * Usage: cc -std=c11 -O2 -o TL1 main.c; ./TL1 < program.tl1 > program.s
- * Assemble with Fuzix as6800, then link with ld6800 -b -C 0x2222.
- * The generated section starts at $2222 and requires the original runtime.
- */
+// Native Linux TL/1 compiler, first subset of the MB-6880 TL1.mot port.
+// Usage: cc -std=c11 -O2 -o TL1 main.c; ./TL1 < program.tl1 > program.s
+// Assemble with Fuzix as6800, then link with ld6800 -b -C 0x2222.
+// The generated section starts at $2222 and requires the original runtime.
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -55,7 +54,7 @@ static bool letter(int c) { return c >= 'A' && c <= 'Z'; }
 static bool digit(int c) { return c >= '0' && c <= '9'; }
 static bool space(int c) { return (c >= 0 && c <= ' ') || c == '.' || c == ';'; }
 
-/* $13FB: the declaration path reads the word without resolving it. */
+// $13FB: the declaration path reads the word without resolving it.
 static void next(bool declaring)
 {
     static const struct { const char *word; int token; } keywords[] = {
@@ -164,7 +163,7 @@ static void absolute(uint8_t op, unsigned addr)
 
 static unsigned pc(void) { return ORIGIN + (unsigned)code_size; }
 
-/* $13B1: the main program uses the frame pointer at $82. */
+// $13B1: the main program uses the frame pointer at $82.
 static void frame_in_x(void)
 {
     if (!x_current)
@@ -201,7 +200,7 @@ struct Operand {
 static struct Operand parse_expression(void);
 static void load_a(struct Operand operand);
 
-/* $1732: a dynamic subscript is in A and value holds the array base. */
+// $1732: a dynamic subscript is in A and value holds the array base.
 static struct Operand indexed_offset(void)
 {
     uint8_t offset = value;
@@ -219,26 +218,26 @@ static struct Operand indexed_offset(void)
     return (struct Operand){ACCUMULATOR, offset};
 }
 
-/* $18AF: write the offset into the next indexed instruction. */
+// $18AF: write the offset into the next indexed instruction.
 static void emit_array_access(uint8_t patch_opcode, uint8_t access_opcode)
 {
     absolute(patch_opcode, pc() + 4);
-    instruction(access_opcode, 0); /* The original leaves this byte untouched. */
+    instruction(access_opcode, 0); // The original leaves this byte untouched.
 }
 
-/* $1718: leave the high byte on the stack and the low byte in A. */
+// $1718: leave the high byte on the stack and the low byte in A.
 static void memory_address(void)
 {
     expect(MEM);
     expect('(');
     load_a(parse_expression());
-    emit(0x36); /* PSHA */
+    emit(0x36); // PSHA
     expect(',');
     load_a(parse_expression());
     expect(')');
 }
 
-/* $15EF: brackets may contain a single operand or a full expression. */
+// $15EF: brackets may contain a single operand or a full expression.
 static struct Operand read_operand(void)
 {
     if (token == '(' || token == '[' || token == '{') {
@@ -251,11 +250,11 @@ static struct Operand read_operand(void)
 
     if (token == MEM) {
         memory_address();
-        instruction(0x97, MEM_ADDRESS + 1); /* STAA */
-        emit(0x32); /* PULA */
-        instruction(0x97, MEM_ADDRESS); /* STAA */
-        instruction(0xde, MEM_ADDRESS); /* LDX */
-        instruction(0xa6, 0); /* LDAA ,X */
+        instruction(0x97, MEM_ADDRESS + 1); // STAA
+        emit(0x32); // PULA
+        instruction(0x97, MEM_ADDRESS); // STAA
+        instruction(0xde, MEM_ADDRESS); // LDX
+        instruction(0xa6, 0); // LDAA ,X
         x_current = false;
         return (struct Operand){ACCUMULATOR, 0};
     }
@@ -269,13 +268,13 @@ static struct Operand read_operand(void)
     uint8_t opcode = 0;
     unsigned routine = 0;
     switch (token) {
-    case NEG: opcode = 0x40; break; /* NEGA */
-    case COM: opcode = 0x43; break; /* COMA, also used for NOT */
-    case LSR: opcode = 0x44; break; /* LSRA */
-    case ROR: opcode = 0x46; break; /* RORA */
-    case ASR: opcode = 0x47; break; /* ASRA */
-    case ASL: opcode = 0x48; break; /* ASLA */
-    case ROL: opcode = 0x49; break; /* ROLA */
+    case NEG: opcode = 0x40; break; // NEGA
+    case COM: opcode = 0x43; break; // COMA, also used for NOT
+    case LSR: opcode = 0x44; break; // LSRA
+    case ROR: opcode = 0x46; break; // RORA
+    case ASR: opcode = 0x47; break; // ASRA
+    case ASL: opcode = 0x48; break; // ASLA
+    case ROL: opcode = 0x49; break; // ROLA
     case RND: routine = RANDOM; break;
     case GET: routine = GET_CHAR; break;
     case READ: routine = READ_NUMBER; break;
@@ -287,8 +286,8 @@ static struct Operand read_operand(void)
         expect(')');
         if (routine) {
             if (routine != RANDOM)
-                instruction(0x97, INPUT_DEVICE); /* STAA */
-            absolute(0xbd, routine); /* JSR */
+                instruction(0x97, INPUT_DEVICE); // STAA
+            absolute(0xbd, routine); // JSR
         } else {
             emit(opcode);
         }
@@ -299,8 +298,8 @@ static struct Operand read_operand(void)
         struct Operand offset = indexed_offset();
         if (offset.kind == ACCUMULATOR) {
             frame_in_x();
-            instruction(0x8b, offset.value); /* ADDA */
-            emit_array_access(0xb7, 0xa6); /* STAA, then LDAA */
+            instruction(0x8b, offset.value); // ADDA
+            emit_array_access(0xb7, 0xa6); // STAA, then LDAA
         }
         return offset;
     }
@@ -313,9 +312,9 @@ static void emit_operand(uint8_t opcode, struct Operand operand)
 {
     if (operand.kind == INDEXED) {
         frame_in_x();
-        opcode += 0x20; /* Immediate to indexed. */
+        opcode += 0x20; // Immediate to indexed.
     } else if (operand.kind == DIRECT) {
-        opcode += 0x10; /* Immediate to direct. */
+        opcode += 0x10; // Immediate to direct.
     }
     instruction(opcode, operand.value);
 }
@@ -323,12 +322,12 @@ static void emit_operand(uint8_t opcode, struct Operand operand)
 static void load_a(struct Operand operand)
 {
     if (operand.kind != ACCUMULATOR)
-        emit_operand(0x86, operand); /* LDAA */
+        emit_operand(0x86, operand); // LDAA
 }
 
 static void right_operand(uint8_t opcode, struct Operand (*parse)(void))
 {
-    /* Reserve PSHA before parsing so absolute addresses stay in place. */
+    // Reserve PSHA before parsing so absolute addresses stay in place.
     emit(0x36);
     struct Operand operand = parse();
     if (operand.kind != ACCUMULATOR) {
@@ -338,21 +337,21 @@ static void right_operand(uint8_t opcode, struct Operand (*parse)(void))
     }
 
     if (opcode == 0x8b) {
-        emit(0x33); /* PULB */
-        emit(0x1b); /* ABA */
+        emit(0x33); // PULB
+        emit(0x1b); // ABA
     } else if (opcode == 0x80 || opcode == 0x81 || opcode == 0xc6) {
-        emit(0x16); /* TAB */
-        emit(0x32); /* PULA */
+        emit(0x16); // TAB
+        emit(0x32); // PULA
         if (opcode != 0xc6)
-            emit(opcode - 0x70); /* SBA or CBA */
+            emit(opcode - 0x70); // SBA or CBA
     } else {
-        instruction(0x97, 0x88); /* STAA $88 */
-        emit(0x32); /* PULA */
-        instruction(opcode + 0x10, 0x88); /* Direct mode */
+        instruction(0x97, 0x88); // STAA $88
+        emit(0x32); // PULA
+        instruction(opcode + 0x10, 0x88); // Direct mode
     }
 }
 
-/* $15BB: * and / use A for the left value and B for the right value. */
+// $15BB: * and / use A for the left value and B for the right value.
 static struct Operand term(void)
 {
     struct Operand left = read_operand();
@@ -360,19 +359,19 @@ static struct Operand term(void)
         unsigned routine = token == '*' ? 0x204d : 0x2069;
         load_a(left);
         next(false);
-        right_operand(0xc6, read_operand); /* LDAB */
-        absolute(0xbd, routine); /* JSR */
+        right_operand(0xc6, read_operand); // LDAB
+        absolute(0xbd, routine); // JSR
         left.kind = ACCUMULATOR;
     }
     return left;
 }
 
-/* $15A4: apply + and - from left to right. */
+// $15A4: apply + and - from left to right.
 static struct Operand sum(void)
 {
     struct Operand left = term();
     while (token == '+' || token == '-') {
-        uint8_t opcode = token == '+' ? 0x8b : 0x80; /* ADDA or SUBA */
+        uint8_t opcode = token == '+' ? 0x8b : 0x80; // ADDA or SUBA
         load_a(left);
         next(false);
         right_operand(opcode, term);
@@ -381,33 +380,33 @@ static struct Operand sum(void)
     return left;
 }
 
-/* $1536: subtract, then use the branch condition to build a byte value. */
+// $1536: subtract, then use the branch condition to build a byte value.
 static struct Operand comparison(void)
 {
     struct Operand left = sum();
     for (;;) {
         uint8_t branch;
         switch (token) {
-        case '=': branch = 0x27; break; /* BEQ */
-        case '#': branch = 0x26; break; /* BNE */
-        case '<': branch = 0x25; break; /* BCS */
-        case '>': branch = 0x22; break; /* BHI */
-        case LT:  branch = 0x2d; break; /* BLT */
-        case GT:  branch = 0x2e; break; /* BGT */
+        case '=': branch = 0x27; break; // BEQ
+        case '#': branch = 0x26; break; // BNE
+        case '<': branch = 0x25; break; // BCS
+        case '>': branch = 0x22; break; // BHI
+        case LT:  branch = 0x2d; break; // BLT
+        case GT:  branch = 0x2e; break; // BGT
         default: return left;
         }
         load_a(left);
         next(false);
-        right_operand(0x80, sum); /* SUBA or SBA */
+        right_operand(0x80, sum); // SUBA or SBA
         instruction(branch, 3);
-        emit(0x4f); /* CLRA */
-        instruction(0x20, 2); /* BRA */
-        instruction(0x86, 0xff); /* LDAA #$FF */
+        emit(0x4f); // CLRA
+        instruction(0x20, 2); // BRA
+        instruction(0x86, 0xff); // LDAA #$FF
         left.kind = ACCUMULATOR;
     }
 }
 
-/* $150A: AND, OR, EOR, ADC and SBC share a precedence level. */
+// $150A: AND, OR, EOR, ADC and SBC share a precedence level.
 static struct Operand parse_expression(void)
 {
     struct Operand left = comparison();
@@ -435,19 +434,19 @@ static void expression(void)
 
 static void statement(void);
 
-/* $115F: evaluate the right side once, then store in reverse order. */
+// $115F: evaluate the right side once, then store in reverse order.
 static void assignment(void)
 {
     bool memory = token == MEM;
     struct Operand offset = {0};
     if (memory) {
         memory_address();
-        emit(0x36); /* PSHA */
+        emit(0x36); // PSHA
     } else {
         offset = indexed_offset();
         if (offset.kind == ACCUMULATOR) {
-            instruction(0x8b, offset.value); /* ADDA */
-            emit(0x36); /* PSHA */
+            instruction(0x8b, offset.value); // ADDA
+            emit(0x36); // PSHA
         }
     }
     if (token == ',') {
@@ -459,25 +458,25 @@ static void assignment(void)
         expression();
     }
     if (memory) {
-        emit(0x33); /* PULB */
-        instruction(0xd7, MEM_ADDRESS + 1); /* STAB */
-        emit(0x33); /* PULB */
-        instruction(0xd7, MEM_ADDRESS); /* STAB */
-        instruction(0xde, MEM_ADDRESS); /* LDX */
-        instruction(0xa7, 0); /* STAA ,X */
+        emit(0x33); // PULB
+        instruction(0xd7, MEM_ADDRESS + 1); // STAB
+        emit(0x33); // PULB
+        instruction(0xd7, MEM_ADDRESS); // STAB
+        instruction(0xde, MEM_ADDRESS); // LDX
+        instruction(0xa7, 0); // STAA ,X
         x_current = false;
         return;
     }
     frame_in_x();
     if (offset.kind == ACCUMULATOR) {
-        emit(0x33); /* PULB */
-        emit_array_access(0xf7, 0xa7); /* STAB, then STAA */
+        emit(0x33); // PULB
+        emit_array_access(0xf7, 0xa7); // STAB, then STAA
     } else {
         instruction(0xa7, offset.value);
     }
 }
 
-/* $1301: device selection precedes the list. Strings follow the JSR inline. */
+// $1301: device selection precedes the list. Strings follow the JSR inline.
 static void write_statement(void)
 {
     expect(WRITE);
@@ -518,11 +517,11 @@ static void write_statement(void)
                 next(false);
                 expect('(');
                 expression();
-                emit(0x36); /* PSHA: save the width. */
+                emit(0x36); // PSHA: save the width.
                 expect(',');
                 expression();
                 expect(')');
-                emit(0x33); /* PULB */
+                emit(0x33); // PULB
                 routine = PRINT_WITH_WIDTH;
             } else {
                 expression();
@@ -537,7 +536,7 @@ static void write_statement(void)
     expect(')');
 }
 
-/* $1105: one statement, including a compound statement. */
+// $1105: one statement, including a compound statement.
 static void statement(void)
 {
     int close = closing_token(token);
@@ -567,13 +566,13 @@ static void statement(void)
         expect(OF);
         size_t end_jump = 0;
         do {
-            right_operand(0x81, parse_expression); /* CMPA or CBA */
-            instruction(0x27, 3); /* BEQ: skip JMP to the next arm. */
+            right_operand(0x81, parse_expression); // CMPA or CBA
+            instruction(0x27, 3); // BEQ: skip JMP to the next arm.
             size_t next_arm = code_size + 1;
             absolute(0x7e, 0);
             bool test_x = x_current;
             statement();
-            /* Link pending exit jumps through their address fields. */
+            // Link pending exit jumps through their address fields.
             absolute(0x7e, end_jump);
             end_jump = code_size - 2;
             patch(next_arm);
@@ -599,14 +598,14 @@ static void statement(void)
         expression();
         expect(DO);
         unsigned start = pc();
-        emit(0x36); /* PSHA: save the limit on each pass. */
+        emit(0x36); // PSHA: save the limit on each pass.
         x_current = false;
         statement();
-        emit(0x32); /* PULA */
+        emit(0x32); // PULA
         frame_in_x();
-        instruction(0xa1, offset); /* CMPA */
-        instruction(0x23, 5); /* BLS: skip INC and JMP. */
-        instruction(0x6c, offset); /* INC */
+        instruction(0xa1, offset); // CMPA
+        instruction(0x23, 5); // BLS: skip INC and JMP.
+        instruction(0x6c, offset); // INC
         absolute(0x7e, start);
         break;
     }
@@ -647,7 +646,7 @@ static void statement(void)
     }
 }
 
-/* $10AD: each name takes one byte plus its optional size. */
+// $10AD: each name takes one byte plus its optional size.
 static uint8_t declarations(uint8_t offset)
 {
     bool array = token == ARRAY;
